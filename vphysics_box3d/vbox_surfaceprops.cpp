@@ -115,8 +115,7 @@ int Box3DPhysicsSurfaceProps::ParseSurfaceData( const char *pFilename, const cha
 		const char *pSurfaceName = pSurface->GetName();
 
 		Box3DSurfaceProp values = {};
-		// Try to find it if we already have a material with this name,
-		// so we can update the values on it, otherwise take the base material.
+		// Update an existing material in place, else start from the base material.
 		UtlSymId_t id = m_SurfaceProps.Find( pSurfaceName );
 		if ( id != m_SurfaceProps.InvalidIndex() )
 			values = m_SurfaceProps[ id ];
@@ -125,8 +124,6 @@ int Box3DPhysicsSurfaceProps::ParseSurfaceData( const char *pFilename, const cha
 
 		ParseBox3DKVSchema( pSurface, kSurfacePropDescs, uint( std::size( kSurfacePropDescs ) ), &values );
 
-		// If we don't have this already, add it,
-		// otherwise update the values.
 		if ( id == m_SurfaceProps.InvalidIndex() )
 			m_SurfaceProps[ pSurfaceName ] = values;
 		else

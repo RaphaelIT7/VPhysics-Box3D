@@ -11,6 +11,7 @@
 class Box3DPhysicsObject;
 class Box3DPhysicsShadowController;
 class Box3DPhysicsMotionController;
+class Box3DPhysicsPlayerController;
 
 class Box3DPhysicsEnvironment final : public IPhysicsEnvironment
 {
@@ -134,6 +135,9 @@ public:
 
 public:
 	b3WorldId GetWorldId() const { return m_WorldId; }
+	// IVP's PI/2 rad/tick angular cap, recomputed each step from the tick length. Objects clamp their
+	// read-back velocity to the same value so the game never sees a "crazy angular velocity".
+	float GetMaxAngularVelocity() const { return m_flMaxAngularVelocity; }
 	IPhysicsObject *CreateObject( const CPhysCollide *pCollisionModel, int materialIndex, const Vector &position, const QAngle &angles, objectparams_t *pParams, bool bStatic );
 
 private:
@@ -145,6 +149,8 @@ private:
 	Vector m_vecGravity = vec3_origin;
 	float m_flAirDensity = 2.0f;
 	float m_flSimulationTimestep = 1.0f / 60.0f;
+	float m_flSimulationClock = 0.0f;
+	float m_flMaxAngularVelocity = 104.0f;	// PI/2 rad at ~66.7Hz; recomputed each step for the real tick
 	bool m_bInSimulation = false;
 
 	IPhysicsCollisionEvent *m_pCollisionEvent = nullptr;
@@ -153,7 +159,10 @@ private:
 
 	CUtlVector< Box3DPhysicsObject * > m_Objects;
 	mutable CUtlVector< Box3DPhysicsObject * > m_ActiveObjects;
+	CUtlVector< Box3DPhysicsObject * > m_DeadObjects;
+	bool m_bDeleteQueueEnabled = false;
 
 	CUtlVector< Box3DPhysicsShadowController * > m_ShadowControllers;
 	CUtlVector< Box3DPhysicsMotionController * > m_MotionControllers;
+	CUtlVector< Box3DPhysicsPlayerController * > m_PlayerControllers;
 };

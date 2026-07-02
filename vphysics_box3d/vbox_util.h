@@ -13,49 +13,47 @@
 inline constexpr float InchesToMetres = 0.0254f;
 inline constexpr float MetresToInches = 1.0f / 0.0254f;
 
-#define vox_expr inline
-
-vox_expr Vector VectorHalfExtent( Vector mins, Vector maxs )
+inline Vector VectorHalfExtent( Vector mins, Vector maxs )
 {
 	return 0.5f * ( maxs - mins );
 }
 
-vox_expr Quaternion ToQuaternion( const QAngle& angles )
+inline Quaternion ToQuaternion( const QAngle& angles )
 {
 	Quaternion result;
 	AngleQuaternion( angles, result );
 	return result;
 }
 
-vox_expr QAngle ToQAngle( const Quaternion &q )
+inline QAngle ToQAngle( const Quaternion &q )
 {
 	QAngle result;
 	QuaternionAngles( q, result );
 	return result;
 }
 
-vox_expr QAngle ToQAngle( const matrix3x4_t& m )
+inline QAngle ToQAngle( const matrix3x4_t& m )
 {
 	QAngle result;
 	MatrixAngles( m, result );
 	return result;
 }
 
-vox_expr Vector Abs( const Vector &v )
+inline Vector Abs( const Vector &v )
 {
 	Vector result;
 	VectorAbs( v, result );
 	return result;
 }
 
-vox_expr Vector Rotate( const Vector &vector, const Quaternion &angle )
+inline Vector Rotate( const Vector &vector, const Quaternion &angle )
 {
 	Vector out;
 	VectorRotate( vector, angle, out );
 	return out;
 }
 
-vox_expr Vector Rotate( const Vector& vector, const matrix3x4_t &matrix )
+inline Vector Rotate( const Vector& vector, const matrix3x4_t &matrix )
 {
 	Vector out;
 	VectorRotate( vector, matrix, out );
@@ -86,7 +84,7 @@ namespace MatrixAxis
 }
 using SourceMatrixAxes = MatrixAxis::SourceMatrixAxes;
 
-vox_expr Vector GetColumn( const matrix3x4_t& m, SourceMatrixAxes axis )
+inline Vector GetColumn( const matrix3x4_t& m, SourceMatrixAxes axis )
 {
 	Vector value;
 	MatrixGetColumn( m, (int)axis, value );
@@ -104,34 +102,34 @@ namespace BoxToSource
 	inline constexpr float InvFactor = InchesToMetres;
 
 	// Direct type conversions: normals, directions, coefficients, dimensionless quantities.
-	vox_expr float		Unitless( float value )			{ return value; }
-	vox_expr Vector		Unitless( b3Vec3 value )		{ return Vector( value.x, value.y, value.z ); }
+	inline float		Unitless( float value )			{ return value; }
+	inline Vector		Unitless( b3Vec3 value )		{ return Vector( value.x, value.y, value.z ); }
 
 	// Any unit with a singular metre factor: distance (m), velocity (m/s), acceleration, force.
-	vox_expr float		Distance( float value )			{ return value * Factor; }
-	vox_expr Vector		Distance( b3Vec3 value )		{ return Vector( Distance( value.x ), Distance( value.y ), Distance( value.z ) ); }
+	inline float		Distance( float value )			{ return value * Factor; }
+	inline Vector		Distance( b3Vec3 value )		{ return Vector( Distance( value.x ), Distance( value.y ), Distance( value.z ) ); }
 
-	vox_expr float		Area( float value )				{ return value * Factor * Factor; }
-	vox_expr float		Volume( float value )			{ return value * Factor * Factor * Factor; }
+	inline float		Area( float value )				{ return value * Factor * Factor; }
+	inline float		Volume( float value )			{ return value * Factor * Factor * Factor; }
 
 	// b3Quat -> Quaternion is a direct passthrough (both are x,y,z,w). Angle also does rad -> deg.
-	vox_expr Quaternion	Quat( b3Quat value )			{ return Quaternion( value.v.x, value.v.y, value.v.z, value.s ); }
-	vox_expr float		Angle( float value )			{ return RAD2DEG( value ); }
-	vox_expr QAngle		Angle( b3Quat value )			{ return ToQAngle( Quat( value ) ); }
+	inline Quaternion	Quat( b3Quat value )			{ return Quaternion( value.v.x, value.v.y, value.v.z, value.s ); }
+	inline float		Angle( float value )			{ return RAD2DEG( value ); }
+	inline QAngle		Angle( b3Quat value )			{ return ToQAngle( Quat( value ) ); }
 
-	vox_expr float		Energy( float value )			{ return value / ( InvFactor * InvFactor ); }
+	inline float		Energy( float value )			{ return value / ( InvFactor * InvFactor ); }
 
-	vox_expr float		AngularImpulse( float value )	{ return Angle( value ); }
-	vox_expr Vector		AngularImpulse( b3Vec3 value )	{ return Vector( AngularImpulse( value.x ), AngularImpulse( value.y ), AngularImpulse( value.z ) ); }
+	inline float		AngularImpulse( float value )	{ return Angle( value ); }
+	inline Vector		AngularImpulse( b3Vec3 value )	{ return Vector( AngularImpulse( value.x ), AngularImpulse( value.y ), AngularImpulse( value.z ) ); }
 
 	// Box3D AABBs are min/max, matching Source's mins/maxs.
-	vox_expr void		AABBBounds( const b3AABB &box, Vector &outMins, Vector &outMaxs )
+	inline void		AABBBounds( const b3AABB &box, Vector &outMins, Vector &outMaxs )
 	{
 		outMins = Distance( box.lowerBound );
 		outMaxs = Distance( box.upperBound );
 	}
 
-	vox_expr matrix3x4_t Matrix( const b3Transform &t )
+	inline matrix3x4_t Matrix( const b3Transform &t )
 	{
 		matrix3x4_t m;
 		QuaternionMatrix( Quat( t.q ), Distance( t.p ), m );
@@ -149,30 +147,30 @@ namespace SourceToBox
 	inline constexpr float Factor	 = InchesToMetres;
 	inline constexpr float InvFactor = MetresToInches;
 
-	vox_expr float		Unitless( float value )			{ return value; }
-	vox_expr b3Vec3		Unitless( Vector value )		{ return b3Vec3{ value.x, value.y, value.z }; }
+	inline float		Unitless( float value )			{ return value; }
+	inline b3Vec3		Unitless( Vector value )		{ return b3Vec3{ value.x, value.y, value.z }; }
 
 	constexpr float		Distance( float value )			{ return value * Factor; }
-	vox_expr b3Vec3		Distance( Vector value )		{ return b3Vec3{ Distance( value.x ), Distance( value.y ), Distance( value.z ) }; }
+	inline b3Vec3		Distance( Vector value )		{ return b3Vec3{ Distance( value.x ), Distance( value.y ), Distance( value.z ) }; }
 
-	vox_expr float		Area( float value )				{ return value * Factor * Factor; }
-	vox_expr float		Volume( float value )			{ return value * Factor * Factor * Factor; }
+	inline float		Area( float value )				{ return value * Factor * Factor; }
+	inline float		Volume( float value )			{ return value * Factor * Factor * Factor; }
 
-	vox_expr b3Quat		Quat( Quaternion value )		{ return b3Quat{ b3Vec3{ value.x, value.y, value.z }, value.w }; }
-	vox_expr float		Angle( float value )			{ return DEG2RAD( value ); }
-	vox_expr b3Quat		Angle( QAngle value )			{ return Quat( ToQuaternion( value ) ); }
+	inline b3Quat		Quat( Quaternion value )		{ return b3Quat{ b3Vec3{ value.x, value.y, value.z }, value.w }; }
+	inline float		Angle( float value )			{ return DEG2RAD( value ); }
+	inline b3Quat		Angle( QAngle value )			{ return Quat( ToQuaternion( value ) ); }
 
-	vox_expr float		Energy( float value )			{ return value / ( InvFactor * InvFactor ); }
+	inline float		Energy( float value )			{ return value / ( InvFactor * InvFactor ); }
 
-	vox_expr float		AngularImpulse( float value )	{ return Angle( value ); }
-	vox_expr b3Vec3		AngularImpulse( Vector value )	{ return b3Vec3{ AngularImpulse( value.x ), AngularImpulse( value.y ), AngularImpulse( value.z ) }; }
+	inline float		AngularImpulse( float value )	{ return Angle( value ); }
+	inline b3Vec3		AngularImpulse( Vector value )	{ return b3Vec3{ AngularImpulse( value.x ), AngularImpulse( value.y ), AngularImpulse( value.z ) }; }
 
-	vox_expr b3AABB		AABBBounds( Vector mins, Vector maxs )
+	inline b3AABB		AABBBounds( Vector mins, Vector maxs )
 	{
 		return b3AABB{ Distance( mins ), Distance( maxs ) };
 	}
 
-	vox_expr b3Transform Transform( const matrix3x4_t &m )
+	inline b3Transform Transform( const matrix3x4_t &m )
 	{
 		Quaternion q;
 		MatrixQuaternion( m, q );
@@ -187,6 +185,61 @@ inline void ClearTrace( trace_t *trace )
 	trace->fraction = 1.0f;
 	trace->fractionleftsolid = 0.0f;
 	trace->surface.name = "**empty**";
+}
+
+//
+// Shadow / held-object control math, shared by the shadow controller
+// and IPhysicsObject::ComputeShadowControl.
+//
+
+// Velocity servo: damp the current velocity, then accelerate toward the remaining delta, each clamped.
+inline void ShadowComputeVelocity( Vector &vecVelocity, const Vector &vecDelta, float flMaxSpeed, float flMaxDampSpeed, float flScaleDelta, float flDamping, Vector *pOutImpulse = nullptr )
+{
+	if ( vecVelocity.LengthSqr() < 1e-6f )
+	{
+		vecVelocity = vec3_origin;
+	}
+	else if ( flMaxDampSpeed > 0.0f )
+	{
+		Vector vecDampen = vecVelocity * -flDamping;
+		const float flSpeed = vecVelocity.Length() * fabsf( flDamping );
+		if ( flSpeed > flMaxDampSpeed )
+			vecDampen *= flMaxDampSpeed / flSpeed;
+		vecVelocity += vecDampen;
+	}
+
+	Vector vecAccel = vec3_origin;
+	if ( flMaxSpeed > 0.0f )
+	{
+		vecAccel = vecDelta * flScaleDelta;
+		const float flSpeed = vecDelta.Length() * flScaleDelta;
+		if ( flSpeed > flMaxSpeed )
+			vecAccel *= flMaxSpeed / flSpeed;
+		vecVelocity += vecAccel;
+	}
+
+	if ( pOutImpulse )
+		*pOutImpulse = vecAccel;
+}
+
+// Shortest-arc rotation from cur to target as axis * angle (degrees). Clamp w before acos: float drift
+// past 1.0 yields a NaN velocity and a deleted entity. (QuaternionAxisAngle returns a unit axis.)
+inline Vector ShadowRotationDeltaDegrees( const QAngle &curAngles, const QAngle &targetAngles )
+{
+	Quaternion qCur, qTarget;
+	AngleQuaternion( curAngles, qCur );
+	AngleQuaternion( targetAngles, qTarget );
+
+	Quaternion qInv, qDelta;
+	QuaternionInvert( qCur, qInv );
+	QuaternionMult( qTarget, qInv, qDelta );
+
+	qDelta.w = clamp( qDelta.w, -1.0f, 1.0f );
+
+	Vector axis;
+	float flAngleDeg;
+	QuaternionAxisAngle( qDelta, axis, flAngleDeg );
+	return axis * flAngleDeg;
 }
 
 template < typename T >

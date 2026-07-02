@@ -10,6 +10,7 @@
 #include "vbox_environment.h"
 #include "vbox_collide.h"
 #include "vbox_controllers.h"
+#include "vbox_surfaceprops.h"
 
 #include "vphysics/friction.h"
 
@@ -17,6 +18,9 @@
 #include "tier0/memdbgon.h"
 
 //-------------------------------------------------------------------------------------------------
+
+// Monotonic id stamped on every object at creation for dangling-proof identity comparison (never reused).
+static uint64 s_nNextUniqueId = 1;
 
 namespace
 {
@@ -39,6 +43,18 @@ namespace
 		void NextFrictionData() override {}
 		float GetFrictionCoefficient() override { return 0.0f; }
 	};
+
+	// Run a callable over every shape on a body.
+	template < typename Fn >
+	void ForEachShape( b3BodyId bodyId, Fn fn )
+	{
+		const int nCount = b3Body_GetShapeCount( bodyId );
+		CUtlVector< b3ShapeId > shapes;
+		shapes.SetCount( nCount );
+		b3Body_GetShapes( bodyId, shapes.Base(), nCount );
+		for ( int i = 0; i < nCount; i++ )
+			fn( shapes[ i ] );
+	}
 }
 
 Box3DPhysicsObject::Box3DPhysicsObject( b3BodyId bodyId, Box3DPhysicsEnvironment *pEnvironment, bool bStatic, int nMaterialIndex, const CPhysCollide *pCollide, const objectparams_t *pParams )
@@ -50,6 +66,7 @@ Box3DPhysicsObject::Box3DPhysicsObject( b3BodyId bodyId, Box3DPhysicsEnvironment
 {
 	m_WorldId = b3Body_GetWorld( bodyId );
 	b3Body_SetUserData( bodyId, this );
+	m_nUniqueId = s_nNextUniqueId++;
 
 	if ( pParams )
 	{
@@ -97,7 +114,19 @@ bool Box3DPhysicsObject::IsAttachedToConstraint( bool ) const	{ return false; }
 
 void Box3DPhysicsObject::EnableCollisions( bool enable )
 {
+	if ( m_bCollisionEnabled == enable )
+		return;
+
 	m_bCollisionEnabled = enable;
+
+	if ( !b3Body_IsValid( m_BodyId ) )
+		return;
+
+	b3Filter filter = b3DefaultFilter();
+	if ( !enable )
+		filter.maskBits = 0;
+
+	ForEachShape( m_BodyId, [ & ]( b3ShapeId shape ) { b3Shape_SetFilter( shape, filter, true ); } );
 }
 
 void Box3DPhysicsObject::EnableGravity( bool enable )
@@ -146,8 +175,9 @@ void Box3DPhysicsObject::RecheckContactPoints( bool )				{}
 
 void Box3DPhysicsObject::SetMass( float mass )
 {
+	mass = clamp( mass, 1.0f, VPHYSICS_MAX_MASS );
 	m_flCachedMass = mass;
-	m_flCachedInvMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+	m_flCachedInvMass = 1.0f / mass;
 
 	if ( m_bStatic )
 		return;
@@ -199,13 +229,50 @@ void Box3DPhysicsObject::SetDragCoefficient( float *, float * )	{}
 void Box3DPhysicsObject::SetBuoyancyRatio( float )				{}
 
 int Box3DPhysicsObject::GetMaterialIndex() const				{ return m_materialIndex; }
-void Box3DPhysicsObject::SetMaterialIndex( int materialIndex )	{ m_materialIndex = materialIndex; }
+void Box3DPhysicsObject::SetMaterialIndex( int materialIndex )
+{
+	if ( m_materialIndex == materialIndex )
+		return;
+
+	m_materialIndex = materialIndex;
+
+	surfacedata_t *pSurface = Box3DPhysicsSurfaceProps::GetInstance().GetSurfaceData( materialIndex );
+	if ( !pSurface || !b3Body_IsValid( m_BodyId ) )
+		return;
+
+	const float flFriction = Max( pSurface->physics.friction, 0.0f );
+	const float flRestitution = clamp( pSurface->physics.elasticity, 0.0f, 1.0f );
+	ForEachShape( m_BodyId, [ & ]( b3ShapeId shape )
+	{
+		b3Shape_SetFriction( shape, flFriction );
+		b3Shape_SetRestitution( shape, flRestitution );
+	} );
+
+	if ( m_pShadowController )
+		m_pShadowController->ObjectMaterialChanged( materialIndex );
+}
 unsigned int Box3DPhysicsObject::GetContents() const			{ return m_contents; }
 void Box3DPhysicsObject::SetContents( unsigned int contents )	{ m_contents = contents; }
 
-float Box3DPhysicsObject::GetSphereRadius() const				{ return 0.0f; }
-void Box3DPhysicsObject::SetSphereRadius( float )				{}
-float Box3DPhysicsObject::GetEnergy() const						{ return 0.0f; }
+float Box3DPhysicsObject::GetSphereRadius() const				{ return m_flSphereRadius; }
+void Box3DPhysicsObject::SetSphereRadius( float radius )			{ m_flSphereRadius = radius; }
+float Box3DPhysicsObject::GetEnergy() const
+{
+	if ( m_bStatic )
+		return 0.0f;
+
+	// 1/2 mvv + 1/2 wIw, converted like IVP's ConvertEnergyToHL.
+	const b3Vec3 v = b3Body_GetLinearVelocity( m_BodyId );
+	const b3Vec3 w = b3InvRotateVector( b3Body_GetTransform( m_BodyId ).q, b3Body_GetAngularVelocity( m_BodyId ) );
+	const b3MassData massData = b3Body_GetMassData( m_BodyId );
+
+	const b3Vec3 Iw = {
+		massData.inertia.cx.x * w.x + massData.inertia.cy.x * w.y + massData.inertia.cz.x * w.z,
+		massData.inertia.cx.y * w.x + massData.inertia.cy.y * w.y + massData.inertia.cz.y * w.z,
+		massData.inertia.cx.z * w.x + massData.inertia.cy.z * w.y + massData.inertia.cz.z * w.z };
+
+	return BoxToSource::Energy( 0.5f * massData.mass * b3Dot( v, v ) + 0.5f * b3Dot( w, Iw ) );
+}
 
 Vector Box3DPhysicsObject::GetMassCenterLocalSpace() const
 {
@@ -258,8 +325,50 @@ void Box3DPhysicsObject::SetVelocityInstantaneous( const Vector *velocity, const
 
 void Box3DPhysicsObject::GetVelocity( Vector *velocity, AngularImpulse *angularVelocity ) const
 {
-	if ( velocity )        *velocity = BoxToSource::Distance( b3Body_GetLinearVelocity( m_BodyId ) );
-	if ( angularVelocity ) *angularVelocity = BoxToSource::AngularImpulse( b3Body_GetAngularVelocity( m_BodyId ) );
+	// Never hand the game a NaN/Inf: it fails the entity's IsValid check and deletes it.
+	if ( velocity )
+	{
+		*velocity = BoxToSource::Distance( b3Body_GetLinearVelocity( m_BodyId ) );
+		if ( !velocity->IsValid() )
+			*velocity = vec3_origin;
+	}
+	if ( angularVelocity )
+	{
+		// Explosion gibs get extreme spin; IVP clamps the core to PI/2 rad/tick and the game reads that
+		// clamped value. Clamp here (where the game reads) to the same per-tick limit the step used, and
+		// write it back so the body stays sane too.
+		const float flMaxAngular = m_pEnvironment->GetMaxAngularVelocity();
+		b3Vec3 w = b3Body_GetAngularVelocity( m_BodyId );
+		const float flLen = sqrtf( b3Dot( w, w ) );
+		if ( flLen > flMaxAngular )
+		{
+			w = b3MulSV( flMaxAngular / flLen, w );
+			if ( !m_bStatic )
+				b3Body_SetAngularVelocity( m_BodyId, w );
+		}
+		*angularVelocity = BoxToSource::AngularImpulse( w );
+		if ( !angularVelocity->IsValid() )
+			*angularVelocity = vec3_origin;
+	}
+}
+
+void Box3DPhysicsObject::SnapshotPreStepVelocity()
+{
+	m_vecPreStepVelocity = m_bStatic ? vec3_origin : BoxToSource::Distance( b3Body_GetLinearVelocity( m_BodyId ) );
+}
+
+Vector Box3DPhysicsObject::FakeVelocity( const Vector &vecVelocity )
+{
+	const Vector vecOld = BoxToSource::Distance( b3Body_GetLinearVelocity( m_BodyId ) );
+	if ( !m_bStatic )
+		b3Body_SetLinearVelocity( m_BodyId, SourceToBox::Distance( vecVelocity ) );
+	return vecOld;
+}
+
+void Box3DPhysicsObject::RestoreVelocity( const Vector &vecVelocity )
+{
+	if ( !m_bStatic )
+		b3Body_SetLinearVelocity( m_BodyId, SourceToBox::Distance( vecVelocity ) );
 }
 
 void Box3DPhysicsObject::AddVelocity( const Vector *velocity, const AngularImpulse *angularVelocity )
@@ -322,8 +431,13 @@ void Box3DPhysicsObject::ApplyForceOffset( const Vector &forceVector, const Vect
 
 void Box3DPhysicsObject::ApplyTorqueCenter( const AngularImpulse &torque )
 {
-	if ( !m_bStatic )
-		b3Body_ApplyAngularImpulse( m_BodyId, SourceToBox::AngularImpulse( torque ), true );
+	if ( m_bStatic )
+		return;
+
+	// The game's angular impulses are in object space (IVP applied them to the core frame).
+	Vector vecWorld;
+	LocalToWorldVector( &vecWorld, torque );
+	b3Body_ApplyAngularImpulse( m_BodyId, SourceToBox::AngularImpulse( vecWorld ), true );
 }
 
 void Box3DPhysicsObject::CalculateForceOffset( const Vector &forceVector, const Vector &worldPosition, Vector *centerForce, AngularImpulse *centerTorque ) const
@@ -355,7 +469,6 @@ float Box3DPhysicsObject::CalculateAngularDrag( const Vector & ) const	{ return 
 bool Box3DPhysicsObject::GetContactPoint( Vector *, IPhysicsObject ** ) const { return false; }
 
 //-------------------------------------------------------------------------------------------------
-// Shadow controllers come in M3.
 
 void Box3DPhysicsObject::SetShadow( float maxSpeed, float maxAngularSpeed, bool allowPhysicsMovement, bool allowPhysicsRotation )
 {
@@ -381,54 +494,6 @@ void Box3DPhysicsObject::RemoveShadowController()
 		m_pEnvironment->DestroyShadowController( m_pShadowController );
 		m_pShadowController = nullptr;
 	}
-}
-// Damp the current velocity, then add an acceleration proportional to the remaining delta, each clamped.
-static void ComputeController( Vector &vecCurrentVelocity, const Vector &vecDelta, float flMaxSpeed, float flMaxDampSpeed, float flScaleDelta, float flDamping )
-{
-	if ( vecCurrentVelocity.LengthSqr() < 1e-6f )
-	{
-		vecCurrentVelocity = vec3_origin;
-	}
-	else if ( flMaxDampSpeed > 0.0f )
-	{
-		Vector vecDampen = vecCurrentVelocity * -flDamping;
-		const float flSpeed = vecCurrentVelocity.Length() * fabsf( flDamping );
-		if ( flSpeed > flMaxDampSpeed )
-			vecDampen *= flMaxDampSpeed / flSpeed;
-		vecCurrentVelocity += vecDampen;
-	}
-
-	if ( flMaxSpeed > 0.0f )
-	{
-		Vector vecAccel = vecDelta * flScaleDelta;
-		const float flSpeed = vecDelta.Length() * flScaleDelta;
-		if ( flSpeed > flMaxSpeed )
-			vecAccel *= flMaxSpeed / flSpeed;
-		vecCurrentVelocity += vecAccel;
-	}
-}
-
-// Shortest-arc rotation from cur to target as axis * angle, in degrees.
-static Vector ComputeRotationDeltaDegrees( const QAngle &curAngles, const QAngle &targetAngles )
-{
-	Quaternion qCur, qTarget;
-	AngleQuaternion( curAngles, qCur );
-	AngleQuaternion( targetAngles, qTarget );
-
-	Quaternion qInv, qDelta;
-	QuaternionInvert( qCur, qInv );
-	QuaternionMult( qTarget, qInv, qDelta );
-
-	// QuaternionAxisAngle does acos( w ) with no clamp: once the object is aligned with the target, w
-	// drifts a hair past 1.0 from float error and acos() returns NaN. That NaN becomes a NaN velocity and
-	// the engine deletes the entity. Clamp to keep it finite.
-	qDelta.w = clamp( qDelta.w, -1.0f, 1.0f );
-
-	Vector axis;
-	float angleDeg;
-	QuaternionAxisAngle( qDelta, axis, angleDeg );
-
-	return axis * angleDeg;
 }
 
 // The engine's grab/shadow (physgun, +use pickup, doors) drives a held object toward a target through
@@ -462,13 +527,24 @@ float Box3DPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &
 
 	const float flFractionTime = flFraction / flDeltaTime;
 
-	ComputeController( linearVelocity, deltaPosition, params.maxSpeed, params.maxDampSpeed, flFractionTime, params.dampFactor );
+	ShadowComputeVelocity( linearVelocity, deltaPosition, params.maxSpeed, params.maxDampSpeed, flFractionTime, params.dampFactor );
 
-	const Vector deltaAngles = ComputeRotationDeltaDegrees( angles, params.targetRotation );
-	ComputeController( angularVelocity, deltaAngles, params.maxAngular, params.maxDampAngular, flFractionTime, params.dampFactor );
+	const Vector deltaAngles = ShadowRotationDeltaDegrees( angles, params.targetRotation );
+	ShadowComputeVelocity( angularVelocity, deltaAngles, params.maxAngular, params.maxDampAngular, flFractionTime, params.dampFactor );
 
 	if ( bTeleport )
-		SetPosition( position, angles, true );
+	{
+		if ( IsCollisionEnabled() )
+		{
+			EnableCollisions( false );
+			SetPosition( position, angles, true );
+			EnableCollisions( true );
+		}
+		else
+		{
+			SetPosition( position, angles, true );
+		}
+	}
 
 	SetVelocity( &linearVelocity, &angularVelocity );
 

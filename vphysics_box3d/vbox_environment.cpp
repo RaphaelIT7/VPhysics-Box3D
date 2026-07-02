@@ -16,6 +16,9 @@
 
 namespace
 {
+	// Minimum time between collision events for the same object pair (IVP's deltaCollisionTime gate).
+	constexpr float kCollisionEventInterval = 0.2f;
+
 	// Apply a Source surface's friction/bounce/density to a shape. Box3D combines both shapes on contact.
 	void ApplyMaterialToShape( b3ShapeDef &shapeDef, int materialIndex )
 	{
@@ -29,6 +32,11 @@ namespace
 		if ( pSurface->physics.density > 0.0f )
 			shapeDef.density = pSurface->physics.density;	// kg/m^3 in both, geometry is in metres
 	}
+
+	// IVP combines both surfaces' coefficients as a PRODUCT (ivp_material.cxx); Box3D defaults to
+	// max(restitution) and sqrt(friction), which makes props far too bouncy and slightly too grippy.
+	float Box3DFrictionCombine( float a, uint64_t, float b, uint64_t )		{ return a * b; }
+	float Box3DRestitutionCombine( float a, uint64_t, float b, uint64_t )	{ return a * b; }
 }
 
 Box3DPhysicsEnvironment::Box3DPhysicsEnvironment()
@@ -40,7 +48,14 @@ Box3DPhysicsEnvironment::Box3DPhysicsEnvironment()
 	// which the engine treats as deleted.
 	def.maximumLinearSpeed = SourceToBox::Distance( 3500.0f );
 	def.enableContinuous = true;
+	// Box3D's default 3 m/s penetration push-out pops overlapping bodies apart hard enough to fling
+	// the player off props; IVP separates penetration gently.
+	def.contactSpeed = SourceToBox::Distance( 20.0f );
 	m_WorldId = b3CreateWorld( &def );
+
+	// Match IVP's product combine rule for both coefficients (not Box3D's max/sqrt defaults).
+	b3World_SetFrictionCallback( m_WorldId, Box3DFrictionCombine );
+	b3World_SetRestitutionCallback( m_WorldId, Box3DRestitutionCombine );
 }
 
 Box3DPhysicsEnvironment::~Box3DPhysicsEnvironment()
@@ -86,6 +101,7 @@ IPhysicsObject *Box3DPhysicsEnvironment::CreateObject( const CPhysCollide *pColl
 	bodyDef.type = bStatic ? b3_staticBody : b3_dynamicBody;
 	bodyDef.position = SourceToBox::Distance( position );
 	bodyDef.rotation = SourceToBox::Angle( angles );
+	bodyDef.isAwake = false;
 
 	const b3BodyId bodyId = b3CreateBody( m_WorldId, &bodyDef );
 
@@ -96,11 +112,23 @@ IPhysicsObject *Box3DPhysicsEnvironment::CreateObject( const CPhysCollide *pColl
 		shapeDef.enableHitEvents = true;
 		ApplyMaterialToShape( shapeDef, materialIndex );
 		for ( int i = 0; i < pCollisionModel->m_Convexes.Count(); i++ )
-			if ( pCollisionModel->m_Convexes[ i ]->m_pHull )
-				b3CreateHullShape( bodyId, &shapeDef, pCollisionModel->m_Convexes[ i ]->m_pHull );
+		{
+			CPhysConvex *pConvex = pCollisionModel->m_Convexes[ i ];
+			if ( !pConvex->m_pHull )
+				continue;
+			// Dynamic bodies get the rest-margin-inflated hull (props rest proud); static geometry stays pristine.
+			b3CreateHullShape( bodyId, &shapeDef, bStatic ? pConvex->m_pHull : pConvex->GetSimHull() );
+		}
 
 		if ( pCollisionModel->m_pMesh )
 			b3CreateMeshShape( bodyId, &shapeDef, pCollisionModel->m_pMesh, b3Vec3{ 1.0f, 1.0f, 1.0f } );
+	}
+
+	if ( !bStatic && pParams && pParams->massCenterOverride && *pParams->massCenterOverride != vec3_origin )
+	{
+		b3MassData massData = b3Body_GetMassData( bodyId );
+		massData.center = SourceToBox::Distance( *pParams->massCenterOverride );
+		b3Body_SetMassData( bodyId, massData );
 	}
 
 	Box3DPhysicsObject *pObject = new Box3DPhysicsObject( bodyId, this, bStatic, materialIndex, pCollisionModel, pParams );
@@ -124,6 +152,7 @@ IPhysicsObject* Box3DPhysicsEnvironment::CreateSphereObject( float radius, int m
 	bodyDef.type = isStatic ? b3_staticBody : b3_dynamicBody;
 	bodyDef.position = SourceToBox::Distance( position );
 	bodyDef.rotation = SourceToBox::Angle( angles );
+	bodyDef.isAwake = false;
 
 	const b3BodyId bodyId = b3CreateBody( m_WorldId, &bodyDef );
 
@@ -135,6 +164,7 @@ IPhysicsObject* Box3DPhysicsEnvironment::CreateSphereObject( float radius, int m
 	b3CreateSphereShape( bodyId, &shapeDef, &sphere );
 
 	Box3DPhysicsObject *pObject = new Box3DPhysicsObject( bodyId, this, isStatic, materialIndex, nullptr, pParams );
+	pObject->SetSphereRadius( radius );
 	m_Objects.AddToTail( pObject );
 	return pObject;
 }
@@ -150,9 +180,28 @@ void Box3DPhysicsEnvironment::DestroyObject( IPhysicsObject* pObject )
 	pBoxObject->RemoveShadowController();
 	for ( int i = 0; i < m_MotionControllers.Count(); i++ )
 		m_MotionControllers[ i ]->DetachObject( pBoxObject );
+	for ( int i = 0; i < m_PlayerControllers.Count(); i++ )
+	{
+		if ( m_PlayerControllers[ i ]->GetControlledObject() == pBoxObject )
+			m_PlayerControllers[ i ]->SetObject( nullptr );
+		m_PlayerControllers[ i ]->ClearGround( pBoxObject );
+	}
+
+	m_ActiveObjects.FindAndRemove( pBoxObject );
+
+	// While the delete queue is on, keep the wrapper alive and in m_Objects so pending references stay
+	// valid -- GMod validates queued damage-event inflictors by GetObjectList() membership. Just stop it
+	// colliding; CleanupDeleteList frees it later.
+	if ( m_bDeleteQueueEnabled && !( pBoxObject->GetCallbackFlags() & CALLBACK_MARKED_FOR_DELETE ) )
+	{
+		pBoxObject->SetCallbackFlags( pBoxObject->GetCallbackFlags() | CALLBACK_MARKED_FOR_DELETE );
+		pBoxObject->EnableCollisions( false );
+		m_DeadObjects.AddToTail( pBoxObject );
+		return;
+	}
 
 	m_Objects.FindAndRemove( pBoxObject );
-	m_ActiveObjects.FindAndRemove( pBoxObject );
+	m_DeadObjects.FindAndRemove( pBoxObject );
 	b3DestroyBody( pBoxObject->GetBodyID() );
 	delete pBoxObject;
 }
@@ -222,34 +271,6 @@ namespace
 		void GetErrorParams( constraint_groupparams_t* pParams ) override { if ( pParams ) memset( pParams, 0, sizeof( *pParams ) ); }
 		void SetErrorParams( const constraint_groupparams_t& ) override {}
 		void SolvePenetration( IPhysicsObject*, IPhysicsObject* ) override {}
-	};
-
-	class Box3DDummyPlayerController final : public IPhysicsPlayerController
-	{
-	public:
-		void Update( const Vector&, const Vector&, float, bool, IPhysicsObject* ) override {}
-		void SetEventHandler( IPhysicsPlayerControllerEvent* ) override {}
-		bool IsInContact() override { return false; }
-		void MaxSpeed( const Vector& ) override {}
-		void SetObject( IPhysicsObject* pObject ) override { m_pObject = pObject; }
-		int GetShadowPosition( Vector* position, QAngle* angles ) override
-		{
-			if ( position ) *position = vec3_origin;
-			if ( angles ) *angles = vec3_angle;
-			return 0;
-		}
-		void StepUp( float ) override {}
-		void Jump() override {}
-		void GetShadowVelocity( Vector* velocity ) override { if ( velocity ) *velocity = vec3_origin; }
-		IPhysicsObject* GetObject() override { return m_pObject; }
-		void GetLastImpulse( Vector* pOut ) override { if ( pOut ) *pOut = vec3_origin; }
-		void SetPushMassLimit( float ) override {}
-		void SetPushSpeedLimit( float ) override {}
-		float GetPushMassLimit() override { return 0.0f; }
-		float GetPushSpeedLimit() override { return 0.0f; }
-		bool WasFrozen() override { return false; }
-
-		IPhysicsObject* m_pObject = nullptr;
 	};
 
 	IPhysicsConstraint* MakeDummyConstraint( IPhysicsObject* pReferenceObject, IPhysicsObject* pAttachedObject )
@@ -327,14 +348,16 @@ void Box3DPhysicsEnvironment::DestroyShadowController( IPhysicsShadowController*
 
 IPhysicsPlayerController* Box3DPhysicsEnvironment::CreatePlayerController( IPhysicsObject* pObject )
 {
-	Box3DDummyPlayerController* pController = new Box3DDummyPlayerController;
-	pController->m_pObject = pObject;
+	Box3DPhysicsPlayerController* pController = new Box3DPhysicsPlayerController( static_cast< Box3DPhysicsObject* >( pObject ) );
+	m_PlayerControllers.AddToTail( pController );
 	return pController;
 }
 
 void Box3DPhysicsEnvironment::DestroyPlayerController( IPhysicsPlayerController* pController )
 {
-	delete static_cast< Box3DDummyPlayerController* >( pController );
+	Box3DPhysicsPlayerController* pPlayer = static_cast< Box3DPhysicsPlayerController* >( pController );
+	m_PlayerControllers.FindAndRemove( pPlayer );
+	delete pPlayer;
 }
 
 IPhysicsMotionController* Box3DPhysicsEnvironment::CreateMotionController( IMotionEvent* pHandler )
@@ -372,25 +395,63 @@ void Box3DPhysicsEnvironment::Simulate( float deltaTime )
 	if ( deltaTime <= 0.0f )
 		return;
 
-	// Drive game-controlled objects before stepping: pickup/physgun/doors (shadow) and the
-	// gravity-gun grab (motion) each nudge their objects' velocity/force toward the game's target.
+	// Drive game-controlled objects before stepping: pickup/physgun/doors (shadow), the player,
+	// and the gravity-gun grab (motion) each nudge their objects toward the game's target.
 	for ( int i = 0; i < m_ShadowControllers.Count(); i++ )
 		m_ShadowControllers[ i ]->OnPreSimulate( deltaTime );
+	for ( int i = 0; i < m_PlayerControllers.Count(); i++ )
+		m_PlayerControllers[ i ]->OnPreSimulate( deltaTime );
 	for ( int i = 0; i < m_MotionControllers.Count(); i++ )
 		m_MotionControllers[ i ]->OnPreSimulate( deltaTime );
+
+	// The solver overwrites velocities; the pre-step values are what impact damage measures against.
+	for ( int i = 0; i < m_Objects.Count(); i++ )
+		m_Objects[ i ]->SnapshotPreStepVelocity();
+
+	m_flSimulationClock += deltaTime;
 
 	m_bInSimulation = true;
 	b3World_Step( m_WorldId, deltaTime, 4 );
 	m_bInSimulation = false;
 
+	// Wake/sleep transitions -> ObjectWake/ObjectSleep (prop sleep networking and game logic).
+	for ( int i = 0; i < m_Objects.Count(); i++ )
+	{
+		Box3DPhysicsObject *pObject = m_Objects[ i ];
+		const bool bAwake = !pObject->IsAsleep();
+		if ( bAwake == pObject->WasAwakeLastStep() )
+			continue;
+
+		pObject->SetAwakeLastStep( bAwake );
+		if ( m_pObjectEvent )
+		{
+			if ( bAwake )
+				m_pObjectEvent->ObjectWake( pObject );
+			else
+				m_pObjectEvent->ObjectSleep( pObject );
+		}
+	}
+
 	// Collect the objects that moved so the game can read back their transforms.
 	const b3BodyEvents events = b3World_GetBodyEvents( m_WorldId );
 	m_ActiveObjects.RemoveAll();
+
+	// IVP clamps angular speed to PI/2 rad/tick (apply_velocity_limit); Box3D has no cap, so explosion
+	// gibs spin unbounded to an invalid transform and the engine deletes them. Clamp moved bodies, and
+	// share the limit so the object read-back (GetVelocity) clamps to the same value.
+	m_flMaxAngularVelocity = ( 3.14159265f * 0.5f ) / deltaTime;
 	for ( int i = 0; i < events.moveCount; i++ )
 	{
 		Box3DPhysicsObject *pObject = static_cast< Box3DPhysicsObject * >( events.moveEvents[ i ].userData );
-		if ( pObject )
-			m_ActiveObjects.AddToTail( pObject );
+		if ( !pObject )
+			continue;
+		m_ActiveObjects.AddToTail( pObject );
+
+		const b3BodyId body = pObject->GetBodyID();
+		const b3Vec3 w = b3Body_GetAngularVelocity( body );
+		const float flLen = sqrtf( b3Dot( w, w ) );
+		if ( flLen > m_flMaxAngularVelocity )
+			b3Body_SetAngularVelocity( body, b3MulSV( m_flMaxAngularVelocity / flLen, w ) );
 	}
 
 	DrainContactEvents();
@@ -470,8 +531,28 @@ void Box3DPhysicsEnvironment::DrainContactEvents()
 		const b3ContactHitEvent &hit = events.hitEvents[ i ];
 		Box3DPhysicsObject *p1 = ObjectFromShape( hit.shapeIdA );
 		Box3DPhysicsObject *p2 = ObjectFromShape( hit.shapeIdB );
-		if ( !p1 || !p2 || !IsCollisionCallback( p1, p2 ) )
+		if ( !p1 || !p2 )
 			continue;
+
+		// Shadow collisions fire when exactly one side is a shadow (player damage from props goes
+		// through this); if both are shadow the game handles it in AI, if neither there's no callback.
+		const bool bIsCollision = IsCollisionCallback( p1, p2 );
+		const bool bIsShadowCollision = ( ( p1->GetCallbackFlags() ^ p2->GetCallbackFlags() ) & CALLBACK_SHADOW_COLLISION ) != 0;
+		if ( !bIsCollision && !bIsShadowCollision )
+			continue;
+
+		// Per-pair rate limit (IVP's deltaCollisionTime). Box3D fires a hit event every tick of sustained
+		// fast contact; cap the same pair to one event per interval and report the real elapsed time.
+		const float flDelta1 = ( p1->m_nLastCollisionPartnerId == p2->m_nUniqueId ) ? m_flSimulationClock - p1->m_flLastCollisionTime : 1000.0f;
+		const float flDelta2 = ( p2->m_nLastCollisionPartnerId == p1->m_nUniqueId ) ? m_flSimulationClock - p2->m_flLastCollisionTime : 1000.0f;
+		const float flDeltaCollisionTime = Min( flDelta1, flDelta2 );
+		if ( flDeltaCollisionTime < kCollisionEventInterval )
+			continue;
+
+		p1->m_flLastCollisionTime = m_flSimulationClock;
+		p1->m_nLastCollisionPartnerId = p2->m_nUniqueId;
+		p2->m_flLastCollisionTime = m_flSimulationClock;
+		p2->m_nLastCollisionPartnerId = p1->m_nUniqueId;
 
 		// Box3D's normal points from A to B; the game wants it pointing toward object[1], so negate.
 		Box3DCollisionData data( -BoxToSource::Unitless( hit.normal ), BoxToSource::Distance( hit.point ) );
@@ -481,13 +562,20 @@ void Box3DPhysicsEnvironment::DrainContactEvents()
 		event.pObjects[ 1 ]			= p2;
 		event.surfaceProps[ 0 ]		= p1->GetMaterialIndex();
 		event.surfaceProps[ 1 ]		= p2->GetMaterialIndex();
-		event.isCollision			= true;
-		event.isShadowCollision		= false;
-		event.deltaCollisionTime	= 100.0f;
+		event.isCollision			= bIsCollision;
+		event.isShadowCollision		= bIsShadowCollision;
+		event.deltaCollisionTime	= flDeltaCollisionTime;
 		event.collisionSpeed		= BoxToSource::Distance( hit.approachSpeed );
 		event.pInternalData			= &data;
 
+		// The game samples velocities in PreCollision and again in PostCollision; the delta drives
+		// impact damage. Hand it the pre-step velocities during PreCollision so the delta is real.
+		const Vector vecOld1 = p1->FakeVelocity( p1->GetPreStepVelocity() );
+		const Vector vecOld2 = p2->FakeVelocity( p2->GetPreStepVelocity() );
 		m_pCollisionEvent->PreCollision( &event );
+		p1->RestoreVelocity( vecOld1 );
+		p2->RestoreVelocity( vecOld2 );
+
 		m_pCollisionEvent->PostCollision( &event );
 	}
 
@@ -523,13 +611,12 @@ void Box3DPhysicsEnvironment::SetSimulationTimestep( float timestep )
 
 float Box3DPhysicsEnvironment::GetSimulationTime() const
 {
-	Log_Stub( LOG_VBox3D );
-	return 0.0f;
+	return m_flSimulationClock;
 }
 
 void Box3DPhysicsEnvironment::ResetSimulationClock()
 {
-	Log_Stub( LOG_VBox3D );
+	m_flSimulationClock = 0.0f;
 }
 
 float Box3DPhysicsEnvironment::GetNextFrameTime() const
@@ -584,12 +671,18 @@ bool Box3DPhysicsEnvironment::TransferObject( IPhysicsObject* pObject, IPhysicsE
 
 void Box3DPhysicsEnvironment::CleanupDeleteList()
 {
-	Log_Stub( LOG_VBox3D );
+	// Flush the deferred deletes now that we're outside simulation/callbacks.
+	const bool bWasEnabled = m_bDeleteQueueEnabled;
+	m_bDeleteQueueEnabled = false;
+	for ( int i = m_DeadObjects.Count() - 1; i >= 0; i-- )
+		DestroyObject( m_DeadObjects[ i ] );
+	m_DeadObjects.RemoveAll();
+	m_bDeleteQueueEnabled = bWasEnabled;
 }
 
 void Box3DPhysicsEnvironment::EnableDeleteQueue( bool enable )
 {
-	Log_Stub( LOG_VBox3D );
+	m_bDeleteQueueEnabled = enable;
 }
 
 bool Box3DPhysicsEnvironment::Save( const physsaveparams_t& params )

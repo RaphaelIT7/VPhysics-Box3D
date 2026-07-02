@@ -18,8 +18,13 @@
 class CPhysConvex
 {
 public:
-	b3HullData		*m_pHull = nullptr;		// owned
+	b3HullData		*m_pHull = nullptr;			// owned, pristine -- used by traces and static bodies
+	b3HullData		*m_pSimHull = nullptr;		// owned, inflated by the rest margin; lazily cooked
 	unsigned int	m_nGameData = 0;
+
+	// Pristine hull grown by the mesh rest offset so props rest a hair proud of flat ground instead of
+	// z-fighting it. Dynamic bodies only; traces keep m_pHull. Cooked on first use.
+	const b3HullData *GetSimHull();
 };
 
 // A collision model: one or more convex pieces, or a single concave triangle mesh (world/displacement).

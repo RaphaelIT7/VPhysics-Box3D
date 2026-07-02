@@ -19,14 +19,18 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( Box3DPhysicsCollision, IPhysicsCollision, VPH
 
 //-------------------------------------------------------------------------------------------------
 //
-// IVP / Havok compact-ledge (.phy) ingestion. The binary format below is copied from Source's
-// studiobyteswap; only the leaf-ledge -> convex step targets Box3D. IVP data is already in metres,
-// so the only transform is the axis swap Vec3( x, z, -y ) (the one true axis remap in Vox3D).
+// IVP compact-ledge (.phy) ingestion. Binary format copied from Source's studiobyteswap; only the
+// leaf-ledge -> convex step targets Box3D. IVP data is already in metres; the sole transform is the
+// axis swap Vec3( x, z, -y ).
 //
 
 #ifndef MAKEID
 #define MAKEID( d, c, b, a )	( ( (int)(a) << 24 ) | ( (int)(b) << 16 ) | ( (int)(c) << 8 ) | ( (int)(d) ) )
 #endif
+
+// Box3D rejects a hull with >=255 half-edges (~6*verts-12), so a round prop's full-detail hull fails
+// to cook. Cap vertices so b3CreateHull simplifies below the limit (44 verts -> 252 half-edges).
+static constexpr int kMaxHullVertices = 44;
 
 namespace ivp_compat
 {
@@ -141,7 +145,7 @@ namespace ivp_compat
 			}
 		}
 
-		b3HullData *pHull = b3CreateHull( verts.Base(), nVertCount, nVertCount );
+		b3HullData *pHull = b3CreateHull( verts.Base(), nVertCount, kMaxHullVertices );
 		if ( !pHull )
 			return nullptr;
 
@@ -182,6 +186,14 @@ namespace ivp_compat
 			if ( pConvex )
 				pCollide->m_Convexes.AddToTail( pConvex );
 		}
+
+		// A solid with no usable convexes must come back NULL, not empty: the game treats a null world
+		// solid as "physics DLL can't build this" and falls back to virtual terrain (displacement props).
+		if ( pCollide->m_Convexes.Count() == 0 )
+		{
+			delete pCollide;
+			return nullptr;
+		}
 		return pCollide;
 	}
 
@@ -205,6 +217,41 @@ static CPhysConvex *HullToConvex( b3HullData *pHull )
 	return pConvex;
 }
 
+const b3HullData *CPhysConvex::GetSimHull()
+{
+	if ( m_pSimHull )
+		return m_pSimHull;
+	if ( !m_pHull )
+		return nullptr;
+
+	const int nCount = m_pHull->vertexCount;
+	const b3Vec3 *pPoints = b3GetHullPoints( m_pHull );
+
+	b3Vec3 center = { 0.0f, 0.0f, 0.0f };
+	for ( int i = 0; i < nCount; i++ )
+	{
+		center.x += pPoints[ i ].x;
+		center.y += pPoints[ i ].y;
+		center.z += pPoints[ i ].z;
+	}
+	const float flInv = nCount > 0 ? 1.0f / nCount : 0.0f;
+	center.x *= flInv; center.y *= flInv; center.z *= flInv;
+
+	// Per-axis outward inflation from the centroid: exact for boxes, a touch larger on diagonal faces.
+	const float flMargin = B3_MESH_REST_OFFSET;
+	CUtlVector< b3Vec3 > inflated;
+	inflated.SetCount( nCount );
+	for ( int i = 0; i < nCount; i++ )
+	{
+		inflated[ i ].x = pPoints[ i ].x + ( pPoints[ i ].x >= center.x ? flMargin : -flMargin );
+		inflated[ i ].y = pPoints[ i ].y + ( pPoints[ i ].y >= center.y ? flMargin : -flMargin );
+		inflated[ i ].z = pPoints[ i ].z + ( pPoints[ i ].z >= center.z ? flMargin : -flMargin );
+	}
+
+	m_pSimHull = b3CreateHull( inflated.Base(), nCount, kMaxHullVertices );
+	return m_pSimHull ? m_pSimHull : m_pHull;
+}
+
 CPhysConvex *Box3DPhysicsCollision::ConvexFromVerts( Vector **pVerts, int vertCount )
 {
 	CUtlVector< b3Vec3 > points;
@@ -212,7 +259,7 @@ CPhysConvex *Box3DPhysicsCollision::ConvexFromVerts( Vector **pVerts, int vertCo
 	for ( int i = 0; i < vertCount; i++ )
 		points[ i ] = SourceToBox::Distance( *pVerts[ i ] );
 
-	return HullToConvex( b3CreateHull( points.Base(), vertCount, vertCount ) );
+	return HullToConvex( b3CreateHull( points.Base(), vertCount, kMaxHullVertices ) );
 }
 
 CPhysConvex *Box3DPhysicsCollision::ConvexFromPlanes( float *pPlanes, int planeCount, float mergeDistance )
@@ -250,6 +297,8 @@ void Box3DPhysicsCollision::ConvexFree( CPhysConvex *pConvex )
 
 	if ( pConvex->m_pHull )
 		b3DestroyHull( pConvex->m_pHull );
+	if ( pConvex->m_pSimHull )
+		b3DestroyHull( pConvex->m_pSimHull );
 	delete pConvex;
 }
 
@@ -322,6 +371,7 @@ CPhysCollide *Box3DPhysicsCollision::ConvertPolysoupToCollide( CPhysPolysoup *pS
 	def.materialIndices = pSoup->m_MaterialIndices.Base();
 	def.weldVertices = true;
 	def.weldTolerance = SourceToBox::Distance( 0.1f );
+	def.identifyEdges = true;	// adjacency info so props don't catch on internal triangle edges
 
 	b3MeshData *pMesh = b3CreateMesh( &def, nullptr, 0 );
 	if ( !pMesh )
@@ -381,6 +431,8 @@ void Box3DPhysicsCollision::DestroyCollide( CPhysCollide *pCollide )
 	{
 		if ( pCollide->m_Convexes[ i ]->m_pHull )
 			b3DestroyHull( pCollide->m_Convexes[ i ]->m_pHull );
+		if ( pCollide->m_Convexes[ i ]->m_pSimHull )
+			b3DestroyHull( pCollide->m_Convexes[ i ]->m_pSimHull );
 		delete pCollide->m_Convexes[ i ];
 	}
 
@@ -428,10 +480,42 @@ float Box3DPhysicsCollision::CollideSurfaceArea( CPhysCollide *pCollide )
 	return 0.0f;
 }
 
+// The support point: the collide's farthest vertex along the direction, in world space.
 Vector Box3DPhysicsCollision::CollideGetExtent( const CPhysCollide *pCollide, const Vector &collideOrigin, const QAngle &collideAngles, const Vector &direction )
 {
-	Log_Stub( LOG_VBox3D );
-	return collideOrigin;
+	if ( !pCollide )
+		return collideOrigin;
+
+	const b3Transform xf = { SourceToBox::Distance( collideOrigin ), SourceToBox::Angle( collideAngles ) };
+	const b3Vec3 localDir = b3InvRotateVector( xf.q, SourceToBox::Unitless( direction ) );
+
+	float flBest = -FLT_MAX;
+	b3Vec3 best = { 0.0f, 0.0f, 0.0f };
+	bool bFound = false;
+
+	for ( int i = 0; i < pCollide->m_Convexes.Count(); i++ )
+	{
+		const b3HullData *pHull = pCollide->m_Convexes[ i ]->m_pHull;
+		if ( !pHull )
+			continue;
+
+		const b3Vec3 *pPoints = b3GetHullPoints( pHull );
+		for ( int p = 0; p < pHull->vertexCount; p++ )
+		{
+			const float flDot = b3Dot( pPoints[ p ], localDir );
+			if ( flDot > flBest )
+			{
+				flBest = flDot;
+				best = pPoints[ p ];
+				bFound = true;
+			}
+		}
+	}
+
+	if ( !bFound )
+		return collideOrigin;
+
+	return BoxToSource::Distance( b3TransformPoint( xf, best ) );
 }
 
 void Box3DPhysicsCollision::CollideGetAABB( Vector *pMins, Vector *pMaxs, const CPhysCollide *pCollide, const Vector &collideOrigin, const QAngle &collideAngles )
@@ -531,6 +615,27 @@ int Box3DPhysicsCollision::GetConvexesUsedInCollideable( const CPhysCollide *pCo
 
 namespace
 {
+	// Hit back-off. Must clear Box3D's shape-cast contact zone (1.25 * B3_LINEAR_SLOP ~= 0.25"), or
+	// every subsequent trace starts at fraction 0 with no normal.
+	constexpr float kTraceDistEpsilon = 0.15f;
+
+	// Back the hit fraction off along the normal by DIST_EPSILON, matching IVP/Source trace behaviour.
+	float CalculateSourceFraction( const Vector &vecDelta, float flFraction, const Vector &vecNormal )
+	{
+		const float flLength = vecDelta.Length();
+		if ( flLength == 0.0f )
+			return 0.0f;
+
+		const Vector vecDir = vecDelta / flLength;
+		float flHitLength = flLength * flFraction;
+
+		const float flDot = DotProduct( vecDir, vecNormal );
+		if ( flDot < 0.0f )
+			flHitLength += kTraceDistEpsilon / flDot;
+
+		return Max( flHitLength, 0.0f ) / flLength;
+	}
+
 	// Trace a ray (point) or swept box against a collide's convex hulls, in the collide's local frame.
 	// Polysoup meshes are not traced.
 	void TraceBoxVsCollide( const Ray_t &ray, const CPhysCollide *pCollide,
@@ -541,6 +646,9 @@ namespace
 
 		ClearTrace( pTrace );
 
+		// m_Start is the swept box's centre; m_Start + m_StartOffset is the entity origin, which is
+		// only used for the reported positions.
+		const Vector vecCenter = ray.m_Start;
 		const Vector vecStart = ray.m_Start + ray.m_StartOffset;
 		pTrace->startpos = vecStart;
 		pTrace->endpos = vecStart + ray.m_Delta;
@@ -550,26 +658,118 @@ namespace
 
 		// The collide's world transform, and the ray taken into the collide's local space.
 		const b3Transform xf = { SourceToBox::Distance( collideOrigin ), SourceToBox::Angle( collideAngles ) };
-		const b3Vec3 localOrigin = b3InvTransformPoint( xf, SourceToBox::Distance( vecStart ) );
+		const b3Vec3 localOrigin = b3InvTransformPoint( xf, SourceToBox::Distance( vecCenter ) );
 		const b3Vec3 localTranslation = b3InvRotateVector( xf.q, SourceToBox::Distance( ray.m_Delta ) );
 
 		const bool bIsPoint = ray.m_Extents.LengthSqr() < 1e-6f;
 
-		// For a swept box, build its 8 corners at the ray origin (local space) as the cast proxy.
-		const b3Vec3 he = SourceToBox::Distance( ray.m_Extents );
-		b3Vec3 boxPoints[ 8 ];
-		if ( !bIsPoint )
+		// Point trace: a simple ray cast, solid when it starts inside.
+		if ( bIsPoint )
 		{
-			int k = 0;
-			for ( int sx = -1; sx <= 1; sx += 2 )
-				for ( int sy = -1; sy <= 1; sy += 2 )
-					for ( int sz = -1; sz <= 1; sz += 2 )
-						boxPoints[ k++ ] = b3Vec3{ localOrigin.x + sx * he.x, localOrigin.y + sy * he.y, localOrigin.z + sz * he.z };
+			b3CastOutput best = {};
+			best.fraction = 1.0f;
+			bool bHit = false;
+
+			for ( int i = 0; i < pCollide->m_Convexes.Count(); i++ )
+			{
+				const b3HullData *pHull = pCollide->m_Convexes[ i ]->m_pHull;
+				if ( !pHull )
+					continue;
+
+				const b3RayCastInput in = { localOrigin, localTranslation, 1.0f };
+				const b3CastOutput out = b3RayCastHull( pHull, &in );
+				if ( out.hit && ( !bHit || out.fraction < best.fraction ) )
+				{
+					best = out;
+					bHit = true;
+				}
+			}
+
+			if ( !bHit )
+				return;
+
+			Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, best.normal ) );
+			if ( vecNormal.LengthSqr() < 1e-6f )
+				vecNormal = ray.m_Delta.LengthSqr() > 1e-6f ? -ray.m_Delta : Vector( 0.0f, 0.0f, 1.0f );
+			VectorNormalize( vecNormal );
+
+			pTrace->fraction = best.fraction;
+			pTrace->endpos = vecStart + ray.m_Delta * best.fraction;
+			pTrace->plane.normal = vecNormal;
+			pTrace->plane.dist = DotProduct( pTrace->endpos, vecNormal );
+			pTrace->contents = CONTENTS_SOLID;
+			pTrace->allsolid = best.fraction == 0.0f;
+			pTrace->startsolid = best.fraction == 0.0f;
+			return;
 		}
 
-		b3CastOutput best = {};
-		best.fraction = 1.0f;
-		bool bHit = false;
+		// Swept box: the box corners taken into the collide's local space, and the box as a hull for
+		// the penetration case below.
+		b3Vec3 boxPoints[ 8 ];
+		int k = 0;
+		for ( int sx = -1; sx <= 1; sx += 2 )
+			for ( int sy = -1; sy <= 1; sy += 2 )
+				for ( int sz = -1; sz <= 1; sz += 2 )
+				{
+					const Vector vecCorner = vecCenter + Vector( sx * ray.m_Extents.x, sy * ray.m_Extents.y, sz * ray.m_Extents.z );
+					boxPoints[ k++ ] = b3InvTransformPoint( xf, SourceToBox::Distance( vecCorner ) );
+				}
+
+		// On an initial overlap the shape cast returns fraction 0 with no normal; recover one via SAT
+		// and, like IVP, ignore penetrations the sweep is moving out of.
+		const b3Transform boxWorldXf = { SourceToBox::Distance( vecCenter ), SourceToBox::Angle( vec3_angle ) };
+		const b3Transform boxToHull = b3InvMulTransforms( xf, boxWorldXf );
+		const b3BoxHull boxHull = b3MakeBoxHull(
+			SourceToBox::Distance( ray.m_Extents.x ),
+			SourceToBox::Distance( ray.m_Extents.y ),
+			SourceToBox::Distance( ray.m_Extents.z ) );
+
+		// Unswept box (stuck checks): solid only when actually intersecting. Derived from m_Delta --
+		// GMod x64's engine Ray_t lacks m_pWorldAxisTransform, so m_IsSwept/m_IsRay read garbage.
+		const bool bIsSwept = ray.m_Delta.LengthSqr() != 0.0f;
+		if ( !bIsSwept )
+		{
+			for ( int i = 0; i < pCollide->m_Convexes.Count(); i++ )
+			{
+				const b3HullData *pHull = pCollide->m_Convexes[ i ]->m_pHull;
+				if ( !pHull )
+					continue;
+
+				b3LocalManifoldPoint points[ 8 ];
+				b3LocalManifold manifold = {};
+				manifold.points = points;
+				b3SATCache cache = {};
+				b3CollideHulls( &manifold, ARRAYSIZE( points ), pHull, &boxHull.base, boxToHull, &cache );
+
+				float flSeparation = FLT_MAX;
+				for ( int p = 0; p < manifold.pointCount; p++ )
+					flSeparation = Min( flSeparation, manifold.points[ p ].separation );
+
+				if ( manifold.pointCount > 0 && flSeparation < -SourceToBox::Distance( 0.02f ) )
+				{
+					// b3CollideHulls' normal points from the hull into the box: out of the surface.
+					Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, manifold.normal ) );
+					VectorNormalize( vecNormal );
+
+					pTrace->fraction = 0.0f;
+					pTrace->endpos = vecStart;
+					pTrace->plane.normal = vecNormal;
+					pTrace->plane.dist = DotProduct( pTrace->endpos, vecNormal );
+					pTrace->contents = CONTENTS_SOLID;
+					pTrace->allsolid = true;
+					pTrace->startsolid = true;
+					return;
+				}
+			}
+			return;
+		}
+
+		// Solid only when genuinely penetrating; a flush contact must block-and-slide, not freeze.
+		const float flDeepPenetration = SourceToBox::Distance( 0.5f );
+
+		bool bHit = false, bStartSolid = false, bEndSolid = false;
+		float flBestFraction = 1.0f;
+		Vector vecBestNormal = vec3_origin;
 
 		for ( int i = 0; i < pCollide->m_Convexes.Count(); i++ )
 		{
@@ -577,43 +777,73 @@ namespace
 			if ( !pHull )
 				continue;
 
-			b3CastOutput out;
-			if ( bIsPoint )
-			{
-				const b3RayCastInput in = { localOrigin, localTranslation, 1.0f };
-				out = b3RayCastHull( pHull, &in );
-			}
-			else
-			{
-				b3ShapeCastInput in = {};
-				in.proxy.points = boxPoints;
-				in.proxy.count = 8;
-				in.proxy.radius = 0.0f;
-				in.translation = localTranslation;
-				in.maxFraction = 1.0f;
-				in.canEncroach = false;
-				out = b3ShapeCastHull( pHull, &in );
-			}
+			b3ShapeCastInput in = {};
+			in.proxy.points = boxPoints;
+			in.proxy.count = 8;
+			in.proxy.radius = 0.0f;
+			in.translation = localTranslation;
+			in.maxFraction = 1.0f;
+			in.canEncroach = false;
+			const b3CastOutput out = b3ShapeCastHull( pHull, &in );
 
-			if ( out.hit && ( !bHit || out.fraction < best.fraction ) )
+			if ( out.hit && out.fraction > 0.0f && b3LengthSquared( out.normal ) > 1e-8f )
 			{
-				best = out;
-				bHit = true;
+				// Ordinary swept hit; b3ShapeCastHull's normal already points out of the hull.
+				Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, out.normal ) );
+				VectorNormalize( vecNormal );
+				if ( DotProduct( ray.m_Delta, vecNormal ) < 0.0f && ( !bHit || out.fraction < flBestFraction ) )
+				{
+					flBestFraction = out.fraction;
+					vecBestNormal = vecNormal;
+					bHit = true;
+				}
+			}
+			else if ( out.hit )
+			{
+				b3LocalManifoldPoint points[ 8 ];
+				b3LocalManifold manifold = {};
+				manifold.points = points;
+				b3SATCache cache = {};
+				b3CollideHulls( &manifold, ARRAYSIZE( points ), pHull, &boxHull.base, boxToHull, &cache );
+				if ( manifold.pointCount <= 0 )
+					continue;
+
+				float flSeparation = 0.0f;
+				for ( int p = 0; p < manifold.pointCount; p++ )
+					flSeparation = Min( flSeparation, manifold.points[ p ].separation );
+				const bool bDeep = flSeparation < -flDeepPenetration;
+				if ( bDeep )
+					bStartSolid = true;
+
+				// Normal points out of the surface. A contact-zone hit only blocks a move advancing into
+				// the face; near-parallel slides must pass, else clip-and-retry wedges the move to zero.
+				Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, manifold.normal ) );
+				VectorNormalize( vecNormal );
+				if ( DotProduct( ray.m_Delta, vecNormal ) < -0.01f && ( !bHit || flBestFraction > 0.0f ) )
+				{
+					flBestFraction = 0.0f;
+					vecBestNormal = vecNormal;
+					bHit = true;
+					if ( bDeep )
+						bEndSolid = true;
+				}
 			}
 		}
 
 		if ( !bHit )
+		{
+			pTrace->fraction = 1.0f;
+			pTrace->endpos = vecStart + ray.m_Delta;
 			return;
+		}
 
-		const Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, best.normal ) );
-
-		pTrace->fraction = best.fraction;
-		pTrace->endpos = vecStart + ray.m_Delta * best.fraction;
-		pTrace->plane.normal = vecNormal;
-		pTrace->plane.dist = DotProduct( pTrace->endpos, vecNormal );
+		pTrace->plane.normal = vecBestNormal;
+		pTrace->fraction = CalculateSourceFraction( ray.m_Delta, flBestFraction, vecBestNormal );
+		pTrace->endpos = vecStart + ray.m_Delta * pTrace->fraction;
+		pTrace->plane.dist = DotProduct( pTrace->endpos, vecBestNormal );
 		pTrace->contents = CONTENTS_SOLID;
-		pTrace->allsolid = best.fraction == 0.0f;
-		pTrace->startsolid = best.fraction == 0.0f;
+		pTrace->allsolid = bStartSolid && bEndSolid;
+		pTrace->startsolid = bStartSolid;
 	}
 }
 
@@ -634,11 +864,59 @@ void Box3DPhysicsCollision::TraceBox( const Ray_t &ray, unsigned int contentsMas
 	TraceBoxVsCollide( ray, pCollide, collideOrigin, collideAngles, ptr );
 }
 
+// Overlap test between two collides; the swept case is unsupported, same as Volt (nothing uses it).
 void Box3DPhysicsCollision::TraceCollide( const Vector &start, const Vector &end, const CPhysCollide *pSweepCollide, const QAngle &sweepAngles, const CPhysCollide *pCollide, const Vector &collideOrigin, const QAngle &collideAngles, trace_t *ptr )
 {
-	Log_Stub( LOG_VBox3D );
-	if ( ptr )
-		ClearTrace( ptr );
+	if ( !ptr )
+		return;
+
+	ClearTrace( ptr );
+	ptr->startpos = start;
+	ptr->endpos = start;
+
+	if ( !pSweepCollide || !pCollide )
+		return;
+
+	if ( start != end )
+	{
+		Log_Stub( LOG_VBox3D );
+		return;
+	}
+
+	const b3Transform xfSweep = { SourceToBox::Distance( start ), SourceToBox::Angle( sweepAngles ) };
+	const b3Transform xfHit = { SourceToBox::Distance( collideOrigin ), SourceToBox::Angle( collideAngles ) };
+	const b3Transform sweepToHit = b3InvMulTransforms( xfHit, xfSweep );
+
+	for ( int i = 0; i < pCollide->m_Convexes.Count(); i++ )
+	{
+		const b3HullData *pHull = pCollide->m_Convexes[ i ]->m_pHull;
+		if ( !pHull )
+			continue;
+
+		for ( int j = 0; j < pSweepCollide->m_Convexes.Count(); j++ )
+		{
+			const b3HullData *pSweepHull = pSweepCollide->m_Convexes[ j ]->m_pHull;
+			if ( !pSweepHull )
+				continue;
+
+			b3DistanceInput input = {};
+			input.proxyA = { b3GetHullPoints( pHull ), pHull->vertexCount, 0.0f };
+			input.proxyB = { b3GetHullPoints( pSweepHull ), pSweepHull->vertexCount, 0.0f };
+			input.transform = sweepToHit;
+			input.useRadii = true;
+
+			b3SimplexCache cache = {};
+			const b3DistanceOutput out = b3ShapeDistance( &input, &cache, nullptr, 0 );
+			if ( out.distance < B3_OVERLAP_SLOP )
+			{
+				ptr->fraction = 0.0f;
+				ptr->contents = CONTENTS_SOLID;
+				ptr->allsolid = true;
+				ptr->startsolid = true;
+				return;
+			}
+		}
+	}
 }
 
 bool Box3DPhysicsCollision::IsBoxIntersectingCone( const Vector &boxAbsMins, const Vector &boxAbsMaxs, const truncatedcone_t &cone )
@@ -779,15 +1057,53 @@ void Box3DPhysicsCollision::ThreadContextDestroy( IPhysicsCollision *pThreadCont
 {
 }
 
+// Displacement terrain: the game hands us its triangles through the event handler.
 CPhysCollide *Box3DPhysicsCollision::CreateVirtualMesh( const virtualmeshparams_t &params )
 {
-	Log_Stub( LOG_VBox3D );
-	return nullptr;
+	if ( !params.pMeshEventHandler )
+		return nullptr;
+
+	virtualmeshlist_t list;
+	params.pMeshEventHandler->GetVirtualMesh( params.userData, &list );
+	if ( list.triangleCount <= 0 || list.vertexCount <= 0 )
+		return nullptr;
+
+	CUtlVector< b3Vec3 > verts;
+	verts.SetCount( list.vertexCount );
+	for ( int i = 0; i < list.vertexCount; i++ )
+		verts[ i ] = SourceToBox::Distance( list.pVerts[ i ] );
+
+	// Reverse each triangle's winding: Box3D meshes are one-sided and Source displacement triangles
+	// wind the opposite way, so without this props fall straight through the terrain.
+	CUtlVector< int32 > indices;
+	indices.SetCount( list.triangleCount * 3 );
+	for ( int i = 0; i < list.triangleCount; i++ )
+	{
+		indices[ i * 3 + 0 ] = list.indices[ i * 3 + 0 ];
+		indices[ i * 3 + 1 ] = list.indices[ i * 3 + 2 ];
+		indices[ i * 3 + 2 ] = list.indices[ i * 3 + 1 ];
+	}
+
+	b3MeshDef def = {};
+	def.vertices = verts.Base();
+	def.vertexCount = list.vertexCount;
+	def.indices = indices.Base();
+	def.triangleCount = list.triangleCount;
+	def.useMedianSplit = true;	// displacement patches are grid-structured
+	def.identifyEdges = true;	// adjacency info so props don't catch on internal triangle edges
+
+	b3MeshData *pMesh = b3CreateMesh( &def, nullptr, 0 );
+	if ( !pMesh )
+		return nullptr;
+
+	CPhysCollide *pCollide = new CPhysCollide;
+	pCollide->m_pMesh = pMesh;
+	return pCollide;
 }
 
 bool Box3DPhysicsCollision::SupportsVirtualMesh()
 {
-	return false;
+	return true;
 }
 
 bool Box3DPhysicsCollision::GetBBoxCacheSize( int *pCachedSize, int *pCachedCount )

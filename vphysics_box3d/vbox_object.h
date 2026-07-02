@@ -149,6 +149,23 @@ public:
 	// Called each frame for bodies that moved, to fire game callbacks (M2+).
 	void PostSimulation( float flTimestep ) {}
 
+	// Sleep-state tracking so the environment can fire ObjectWake/ObjectSleep transitions.
+	bool WasAwakeLastStep() const { return m_bLastAwake; }
+	void SetAwakeLastStep( bool bAwake ) { m_bLastAwake = bAwake; }
+
+	// Per-pair collision-event rate limit (IVP's deltaCollisionTime): last sim time this object fired an
+	// event and the partner's unique id. Ids never repeat, so a reallocated partner can't false-match.
+	float m_flLastCollisionTime = -1000.0f;
+	uint64 m_nLastCollisionPartnerId = 0;
+	uint64 m_nUniqueId = 0;
+
+	// Pre-step velocity snapshot, faked back in during PreCollision so the game's pre/post velocity
+	// delta (impact damage) is real.
+	void SnapshotPreStepVelocity();
+	const Vector &GetPreStepVelocity() const { return m_vecPreStepVelocity; }
+	Vector FakeVelocity( const Vector &vecVelocity );
+	void RestoreVelocity( const Vector &vecVelocity );
+
 private:
 	// Josh:
 	// Always put m_pGameData first. Some games that will remain un-named offset by the
@@ -169,6 +186,7 @@ private:
 
 	int m_materialIndex = 0;
 	uint m_contents = CONTENTS_SOLID;
+	float m_flSphereRadius = 0.0f;	// non-zero only for sphere objects
 
 	float m_flLinearDamping = 0.0f;
 	float m_flAngularDamping = 0.0f;
@@ -178,6 +196,9 @@ private:
 	float m_flCachedInvMass = 0.0f;
 
 	const CPhysCollide *m_pCollide = nullptr;
+
+	Vector m_vecPreStepVelocity = vec3_origin;
+	bool m_bLastAwake = false;
 
 	b3BodyId m_BodyId = b3_nullBodyId;
 	Box3DPhysicsEnvironment *m_pEnvironment = nullptr;
