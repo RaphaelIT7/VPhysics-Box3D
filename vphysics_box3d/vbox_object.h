@@ -145,6 +145,7 @@ public:
 public:
 	Box3DPhysicsEnvironment *GetEnvironment() { return m_pEnvironment; }
 	b3BodyId GetBodyID() const { return m_BodyId; }
+	float BuoyancyRatio() const { return m_flBuoyancyRatio; }
 
 	// Called each frame for bodies that moved, to fire game callbacks (M2+).
 	void PostSimulation( float flTimestep ) {}
@@ -167,6 +168,9 @@ public:
 	void RestoreVelocity( const Vector &vecVelocity );
 
 private:
+	// Recompute m_flBuoyancyRatio from mass/volume and material density.
+	void CalculateBuoyancy();
+
 	// Josh:
 	// Always put m_pGameData first. Some games that will remain un-named offset by the
 	// vtable to get to this instead of calling GetGameData().
@@ -187,6 +191,10 @@ private:
 	int m_materialIndex = 0;
 	uint m_contents = CONTENTS_SOLID;
 	float m_flSphereRadius = 0.0f;	// non-zero only for sphere objects
+	float m_flVolume = 0.0f;		// collision volume, Source units (0 = unknown)
+	float m_flMaterialDensity = 0.0f;	// surfaceprops density, kg/m^3
+	float m_flBuoyancyRatio = 1.0f;	// actualDensity / materialDensity
+	bool m_bTrigger = false;
 
 	float m_flLinearDamping = 0.0f;
 	float m_flAngularDamping = 0.0f;

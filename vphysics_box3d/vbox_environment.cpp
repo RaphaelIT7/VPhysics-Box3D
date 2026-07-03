@@ -188,6 +188,8 @@ void Box3DPhysicsEnvironment::DestroyObject( IPhysicsObject* pObject )
 			m_PlayerControllers[ i ]->SetObject( nullptr );
 		m_PlayerControllers[ i ]->ClearGround( pBoxObject );
 	}
+	for ( int i = 0; i < m_FluidControllers.Count(); i++ )
+		m_FluidControllers[ i ]->DetachObject( pBoxObject );
 
 	m_ActiveObjects.FindAndRemove( pBoxObject );
 
@@ -210,13 +212,16 @@ void Box3DPhysicsEnvironment::DestroyObject( IPhysicsObject* pObject )
 
 IPhysicsFluidController* Box3DPhysicsEnvironment::CreateFluidController( IPhysicsObject* pFluidObject, fluidparams_t* pParams )
 {
-	Log_Stub( LOG_VBox3D );
-	return nullptr;
+	Box3DPhysicsFluidController *pController = new Box3DPhysicsFluidController( static_cast< Box3DPhysicsObject * >( pFluidObject ), pParams );
+	m_FluidControllers.AddToTail( pController );
+	return pController;
 }
 
-void Box3DPhysicsEnvironment::DestroyFluidController( IPhysicsFluidController* )
+void Box3DPhysicsEnvironment::DestroyFluidController( IPhysicsFluidController* pController )
 {
-	Log_Stub( LOG_VBox3D );
+	Box3DPhysicsFluidController *pFluid = static_cast< Box3DPhysicsFluidController * >( pController );
+	m_FluidControllers.FindAndRemove( pFluid );
+	delete pFluid;
 }
 
 IPhysicsSpring* Box3DPhysicsEnvironment::CreateSpring( IPhysicsObject* pObjectStart, IPhysicsObject* pObjectEnd, springparams_t* pParams )
@@ -405,6 +410,8 @@ void Box3DPhysicsEnvironment::Simulate( float deltaTime )
 		m_PlayerControllers[ i ]->OnPreSimulate( deltaTime );
 	for ( int i = 0; i < m_MotionControllers.Count(); i++ )
 		m_MotionControllers[ i ]->OnPreSimulate( deltaTime );
+	for ( int i = 0; i < m_FluidControllers.Count(); i++ )
+		m_FluidControllers[ i ]->OnPreSimulate( deltaTime );
 
 	// The solver overwrites velocities; the pre-step values are what impact damage measures against.
 	for ( int i = 0; i < m_Objects.Count(); i++ )

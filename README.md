@@ -17,8 +17,8 @@ Work in progress!
 | Triggers | ✔️ | ❌ |
 | Object touch callbacks | ✔️ | ✔️ |
 | Prop damage / breaking | ✔️ | ✔️ |
-| Fluid events | ✔️ | ❌ |
-| Prop splashing effects | ✔️ | ❌ |
+| Fluid events | ✔️ | ✔️ |
+| Prop splashing effects | ✔️ | ✔️ |
 | Wheeled vehicles | ✔️ | ❌ |
 | Raycast vehicles (airboat) | ❌ | ❌ |
 | Shadow controllers (NPCs, doors) | ✔️ | ✔️ |

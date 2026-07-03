@@ -12,6 +12,7 @@ class Box3DPhysicsObject;
 class Box3DPhysicsShadowController;
 class Box3DPhysicsMotionController;
 class Box3DPhysicsPlayerController;
+class Box3DPhysicsFluidController;
 
 class Box3DPhysicsEnvironment final : public IPhysicsEnvironment
 {
@@ -138,6 +139,7 @@ public:
 	// IVP's PI/2 rad/tick angular cap, recomputed each step from the tick length. Objects clamp their
 	// read-back velocity to the same value so the game never sees a "crazy angular velocity".
 	float GetMaxAngularVelocity() const { return m_flMaxAngularVelocity; }
+	IPhysicsCollisionEvent *GetCollisionEvent() const { return m_pCollisionEvent; }
 	IPhysicsObject *CreateObject( const CPhysCollide *pCollisionModel, int materialIndex, const Vector &position, const QAngle &angles, objectparams_t *pParams, bool bStatic );
 
 private:
@@ -165,4 +167,5 @@ private:
 	CUtlVector< Box3DPhysicsShadowController * > m_ShadowControllers;
 	CUtlVector< Box3DPhysicsMotionController * > m_MotionControllers;
 	CUtlVector< Box3DPhysicsPlayerController * > m_PlayerControllers;
+	CUtlVector< Box3DPhysicsFluidController * > m_FluidControllers;
 };

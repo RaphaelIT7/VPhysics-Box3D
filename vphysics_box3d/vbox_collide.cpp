@@ -653,7 +653,7 @@ namespace
 		pTrace->startpos = vecStart;
 		pTrace->endpos = vecStart + ray.m_Delta;
 
-		if ( !pCollide || pCollide->m_Convexes.Count() == 0 )
+		if ( !pCollide || ( pCollide->m_Convexes.Count() == 0 && !pCollide->m_pMesh ) )
 			return;
 
 		// The collide's world transform, and the ray taken into the collide's local space.
@@ -678,6 +678,18 @@ namespace
 
 				const b3RayCastInput in = { localOrigin, localTranslation, 1.0f };
 				const b3CastOutput out = b3RayCastHull( pHull, &in );
+				if ( out.hit && ( !bHit || out.fraction < best.fraction ) )
+				{
+					best = out;
+					bHit = true;
+				}
+			}
+
+			if ( pCollide->m_pMesh )
+			{
+				const b3Mesh mesh = { pCollide->m_pMesh, b3Vec3{ 1.0f, 1.0f, 1.0f } };
+				const b3RayCastInput in = { localOrigin, localTranslation, 1.0f };
+				const b3CastOutput out = b3RayCastMesh( &mesh, &in );
 				if ( out.hit && ( !bHit || out.fraction < best.fraction ) )
 				{
 					best = out;
@@ -761,6 +773,24 @@ namespace
 					return;
 				}
 			}
+
+			// Mesh overlap has no push-out normal; report solid, up normal.
+			if ( pCollide->m_pMesh )
+			{
+				const b3Mesh mesh = { pCollide->m_pMesh, b3Vec3{ 1.0f, 1.0f, 1.0f } };
+				const b3ShapeProxy proxy = { boxPoints, 8, 0.0f };
+				if ( b3OverlapMesh( &mesh, b3Transform_identity, &proxy ) )
+				{
+					pTrace->fraction = 0.0f;
+					pTrace->endpos = vecStart;
+					pTrace->plane.normal = Vector( 0.0f, 0.0f, 1.0f );
+					pTrace->plane.dist = DotProduct( pTrace->endpos, pTrace->plane.normal );
+					pTrace->contents = CONTENTS_SOLID;
+					pTrace->allsolid = true;
+					pTrace->startsolid = true;
+					return;
+				}
+			}
 			return;
 		}
 
@@ -826,6 +856,31 @@ namespace
 					bHit = true;
 					if ( bDeep )
 						bEndSolid = true;
+				}
+			}
+		}
+
+		// Swept box vs concave mesh; initial overlap is a miss (unswept path handles stuck boxes).
+		if ( pCollide->m_pMesh )
+		{
+			const b3Mesh mesh = { pCollide->m_pMesh, b3Vec3{ 1.0f, 1.0f, 1.0f } };
+			b3ShapeCastInput in = {};
+			in.proxy.points = boxPoints;
+			in.proxy.count = 8;
+			in.proxy.radius = 0.0f;
+			in.translation = localTranslation;
+			in.maxFraction = 1.0f;
+			in.canEncroach = false;
+			const b3CastOutput out = b3ShapeCastMesh( &mesh, &in );
+			if ( out.hit && out.fraction > 0.0f && b3LengthSquared( out.normal ) > 1e-8f )
+			{
+				Vector vecNormal = BoxToSource::Unitless( b3RotateVector( xf.q, out.normal ) );
+				VectorNormalize( vecNormal );
+				if ( DotProduct( ray.m_Delta, vecNormal ) < 0.0f && ( !bHit || out.fraction < flBestFraction ) )
+				{
+					flBestFraction = out.fraction;
+					vecBestNormal = vecNormal;
+					bHit = true;
 				}
 			}
 		}

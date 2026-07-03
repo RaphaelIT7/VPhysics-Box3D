@@ -76,6 +76,7 @@ Box3DPhysicsObject::Box3DPhysicsObject( b3BodyId bodyId, Box3DPhysicsEnvironment
 
 		m_flLinearDamping = pParams->damping;
 		m_flAngularDamping = pParams->rotdamping;
+		m_flVolume = pParams->volume;
 		if ( !bStatic )
 		{
 			b3Body_SetLinearDamping( bodyId, pParams->damping );
@@ -91,6 +92,26 @@ Box3DPhysicsObject::Box3DPhysicsObject( b3BodyId bodyId, Box3DPhysicsEnvironment
 		m_flCachedMass = bStatic ? 0.0f : b3Body_GetMass( bodyId );
 		m_flCachedInvMass = bStatic ? 0.0f : b3Body_GetInverseMass( bodyId );
 	}
+
+	if ( surfacedata_t *pSurface = Box3DPhysicsSurfaceProps::GetInstance().GetSurfaceData( m_materialIndex ) )
+		m_flMaterialDensity = pSurface->physics.density;
+	CalculateBuoyancy();
+}
+
+// Buoyancy ratio = (mass/volume) / material density, so a prop sinks iff its material density > the water's,
+// regardless of how loose its collision hull is.
+void Box3DPhysicsObject::CalculateBuoyancy()
+{
+	if ( m_flVolume > 0.0f && m_flMaterialDensity > 0.0f )
+	{
+		const float flVolume = SourceToBox::Volume( Max( m_flVolume, 5.0f ) );
+		const float flActualDensity = m_flCachedMass / flVolume;
+		m_flBuoyancyRatio = flActualDensity / m_flMaterialDensity;
+	}
+	else
+	{
+		m_flBuoyancyRatio = 1.0f;
+	}
 }
 
 Box3DPhysicsObject::~Box3DPhysicsObject()
@@ -102,7 +123,7 @@ Box3DPhysicsObject::~Box3DPhysicsObject()
 
 bool Box3DPhysicsObject::IsStatic() const						{ return m_bStatic; }
 bool Box3DPhysicsObject::IsAsleep() const						{ return m_bStatic || !b3Body_IsAwake( m_BodyId ); }
-bool Box3DPhysicsObject::IsTrigger() const						{ return false; }
+bool Box3DPhysicsObject::IsTrigger() const						{ return m_bTrigger; }
 bool Box3DPhysicsObject::IsFluid() const						{ return false; }
 bool Box3DPhysicsObject::IsHinged() const						{ return false; }
 bool Box3DPhysicsObject::IsCollisionEnabled() const				{ return m_bCollisionEnabled; }
@@ -178,6 +199,7 @@ void Box3DPhysicsObject::SetMass( float mass )
 	mass = clamp( mass, 1.0f, VPHYSICS_MAX_MASS );
 	m_flCachedMass = mass;
 	m_flCachedInvMass = 1.0f / mass;
+	CalculateBuoyancy();
 
 	if ( m_bStatic )
 		return;
@@ -226,7 +248,7 @@ void Box3DPhysicsObject::GetDamping( float *speed, float *rot ) const
 }
 
 void Box3DPhysicsObject::SetDragCoefficient( float *, float * )	{}
-void Box3DPhysicsObject::SetBuoyancyRatio( float )				{}
+void Box3DPhysicsObject::SetBuoyancyRatio( float ratio )			{ m_flBuoyancyRatio = ratio; }
 
 int Box3DPhysicsObject::GetMaterialIndex() const				{ return m_materialIndex; }
 void Box3DPhysicsObject::SetMaterialIndex( int materialIndex )
@@ -237,6 +259,11 @@ void Box3DPhysicsObject::SetMaterialIndex( int materialIndex )
 	m_materialIndex = materialIndex;
 
 	surfacedata_t *pSurface = Box3DPhysicsSurfaceProps::GetInstance().GetSurfaceData( materialIndex );
+	if ( pSurface )
+	{
+		m_flMaterialDensity = pSurface->physics.density;
+		CalculateBuoyancy();
+	}
 	if ( !pSurface || !b3Body_IsValid( m_BodyId ) )
 		return;
 
@@ -554,8 +581,9 @@ float Box3DPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &
 const CPhysCollide *Box3DPhysicsObject::GetCollide() const	{ return m_pCollide; }
 const char *Box3DPhysicsObject::GetName() const				{ return m_pName; }
 
-void Box3DPhysicsObject::BecomeTrigger()					{ Log_Stub( LOG_VBox3D ); }
-void Box3DPhysicsObject::RemoveTrigger()					{ Log_Stub( LOG_VBox3D ); }
+// A trigger (e.g. water) is non-solid: drop collision response so bodies pass through and queries find them.
+void Box3DPhysicsObject::BecomeTrigger()					{ m_bTrigger = true; EnableCollisions( false ); }
+void Box3DPhysicsObject::RemoveTrigger()					{ m_bTrigger = false; EnableCollisions( true ); }
 void Box3DPhysicsObject::BecomeHinged( int )				{ Log_Stub( LOG_VBox3D ); }
 void Box3DPhysicsObject::RemoveHinged()						{ Log_Stub( LOG_VBox3D ); }
 
