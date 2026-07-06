@@ -19,6 +19,39 @@ using IPhysicsObjectInterface = IPredictedPhysicsObject;
 using IPhysicsObjectInterface = IPhysicsObject;
 #endif
 
+// Serialized object state for save/restore; rebuilt via CreateObject from the restore params' shape.
+struct Box3DSavedObjectState
+{
+    Vector position = vec3_origin;
+    QAngle angles = vec3_angle;
+    Vector velocity = vec3_origin;
+    Vector angularVelocity = vec3_origin;
+    Vector massCenter = vec3_origin;
+    Vector inertia = vec3_origin;
+    float mass = 0.0f;
+    float sphereRadius = 0.0f; // >0 => sphere object, rebuilt via CreateSphereObject
+    float linearDamping = 0.0f;
+    float angularDamping = 0.0f;
+    float dragCoefficient = 0.0f;
+    float angularDragCoefficient = 0.0f;
+    float volume = 0.0f;
+    float buoyancyRatio = 1.0f;
+    int materialIndex = 0;
+    uint contents = 0;
+    uint32 collisionHints = 0;
+    uint16 gameFlags = 0;
+    uint16 gameIndex = 0;
+    uint16 callbackFlags = 0;
+    bool bStatic = false;
+    bool bMotionEnabled = true;
+    bool bGravityEnabled = true;
+    bool bCollisionEnabled = true;
+    bool bDragEnabled = false;
+    bool bAsleep = false;
+    bool bTrigger = false;
+};
+static constexpr int kBox3DSaveVersion = 1;
+
 class Box3DPhysicsObject final : public IPhysicsObjectInterface
 {
 public:
@@ -187,6 +220,10 @@ public:
     {
         return m_flBuoyancyRatio;
     }
+
+    // Capture / re-apply save state; ApplyRestoreState runs after CreateObject has rebuilt the body.
+    void FillSaveState(Box3DSavedObjectState& s) const;
+    void ApplyRestoreState(const Box3DSavedObjectState& s);
 
     // Called each frame for bodies that moved, to fire game callbacks (M2+).
     void PostSimulation(float flTimestep)

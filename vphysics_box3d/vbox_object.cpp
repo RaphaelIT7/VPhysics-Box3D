@@ -426,6 +426,70 @@ void Box3DPhysicsObject::SetBuoyancyRatio(float ratio)
     m_flBuoyancyRatio = ratio;
 }
 
+void Box3DPhysicsObject::FillSaveState(Box3DSavedObjectState& s) const
+{
+    GetPosition(&s.position, &s.angles);
+    GetVelocity(&s.velocity, &s.angularVelocity);
+    s.massCenter = GetMassCenterLocalSpace();
+    s.inertia = GetInertia();
+    s.mass = GetMass();
+    s.sphereRadius = m_flSphereRadius;
+    s.linearDamping = m_flLinearDamping;
+    s.angularDamping = m_flAngularDamping;
+    s.dragCoefficient = m_flDragCoefficient;
+    s.angularDragCoefficient = m_flAngularDragCoefficient;
+    s.volume = m_flVolume;
+    s.buoyancyRatio = m_flBuoyancyRatio;
+    s.materialIndex = m_materialIndex;
+    s.contents = m_contents;
+    s.collisionHints = m_collisionHints;
+    s.gameFlags = m_gameFlags;
+    s.gameIndex = m_gameIndex;
+    s.callbackFlags = m_callbackFlags;
+    s.bStatic = m_bStatic;
+    s.bMotionEnabled = m_bMotionEnabled;
+    s.bGravityEnabled = m_bGravityEnabled;
+    s.bCollisionEnabled = m_bCollisionEnabled;
+    s.bDragEnabled = m_bDragEnabled;
+    s.bAsleep = IsAsleep();
+    s.bTrigger = m_bTrigger;
+}
+
+// CreateObject already set transform, mass, damping, material and COM; apply the rest.
+void Box3DPhysicsObject::ApplyRestoreState(const Box3DSavedObjectState& s)
+{
+    m_gameFlags = s.gameFlags;
+    m_gameIndex = s.gameIndex;
+    m_callbackFlags = s.callbackFlags;
+    m_collisionHints = s.collisionHints;
+    m_contents = s.contents;
+    m_flBuoyancyRatio = s.buoyancyRatio;
+
+    float drag = s.dragCoefficient, angDrag = s.angularDragCoefficient;
+    SetDragCoefficient(&drag, &angDrag);
+    EnableDrag(s.bDragEnabled);
+
+    if (!s.bStatic)
+        SetInertia(s.inertia);
+
+    const AngularImpulse angVel = s.angularVelocity;
+    SetVelocity(&s.velocity, &angVel);
+
+    if (!s.bGravityEnabled)
+        EnableGravity(false);
+    if (!s.bCollisionEnabled)
+        EnableCollisions(false);
+    if (s.bTrigger)
+        BecomeTrigger();
+    if (!s.bMotionEnabled)
+        EnableMotion(false); // freezes to static; do this last so the velocity above still applied
+
+    if (s.bAsleep)
+        Sleep();
+    else
+        Wake();
+}
+
 int Box3DPhysicsObject::GetMaterialIndex() const
 {
     return m_materialIndex;

@@ -9,7 +9,9 @@
 #include "vbox_interface.h"
 #include "vphysics/performance.h"
 
+#include <cstdint>
 #include <functional>
+#include <unordered_map>
 
 class Box3DPhysicsObject;
 class Box3DPhysicsShadowController;
@@ -248,6 +250,9 @@ private:
     CUtlVector<Box3DPhysicsPlayerController*> m_PlayerControllers;
     CUtlVector<Box3DPhysicsFluidController*> m_FluidControllers;
     CUtlVector<Box3DPhysicsConstraint*> m_Constraints;
+    // Old (pre-save) pointer -> restored object/constraint, so a restored constraint can relink to its bodies.
+    // Objects register on Restore; constraints look up. Cleared by Pre/PostRestore.
+    std::unordered_map<uintptr_t, void*> m_SaveRestoreMap;
     CUtlVector<Box3DPhysicsConstraint*> m_Pulleys; // subset of m_Constraints solved per-step (no native joint)
     CUtlVector<Box3DPhysicsSpring*> m_Springs;
     physics_performanceparams_t m_PerformanceParams;

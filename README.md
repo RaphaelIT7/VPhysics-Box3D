@@ -22,7 +22,7 @@ Work in progress!
 | Wheeled vehicles | ✔️ | ✔️ | ❌ |
 | Raycast vehicles (airboat) | ✔️ | ❌ | ❌ |
 | Shadow controllers (NPCs, doors) | ✔️ | ✔️ | ✔️ |
-| Save / restore | ✔️ | ✔️ | ❌ |
+| Save / restore | ✔️ | ✔️ | ✔️ |
 | Portal support | ✔️ | ✔️ | ❌ |
 | Per-object no-collide callbacks | ✔️ | ✔️ | ✔️ |
 | Crash-resistant solver | ❌ | ✔️ | ✔️ |

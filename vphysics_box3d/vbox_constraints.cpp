@@ -330,7 +330,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateFixedConstraint(
         def.base.localFrameB = frameB;
         return b3CreateWeldJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, fixed.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Fixed, &fixed, sizeof(fixed));
+    return FinishConstraint(pConstraint, pGroup, fixed.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreateHingeConstraint(
@@ -380,7 +382,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateHingeConstraint(
         }
         return b3CreateRevoluteJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, hinge.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Hinge, &hinge, sizeof(hinge));
+    return FinishConstraint(pConstraint, pGroup, hinge.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreateBallsocketConstraint(
@@ -404,7 +408,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateBallsocketConstraint(
         def.base.localFrameB.p = posB;
         return b3CreateSphericalJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, ballsocket.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Ballsocket, &ballsocket, sizeof(ballsocket));
+    return FinishConstraint(pConstraint, pGroup, ballsocket.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreateSlidingConstraint(
@@ -452,7 +458,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateSlidingConstraint(
         }
         return b3CreatePrismaticJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, sliding.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Sliding, &sliding, sizeof(sliding));
+    return FinishConstraint(pConstraint, pGroup, sliding.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreateLengthConstraint(
@@ -493,7 +501,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateLengthConstraint(
         }
         return b3CreateDistanceJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, length.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Length, &length, sizeof(length));
+    return FinishConstraint(pConstraint, pGroup, length.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
@@ -587,7 +597,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
         def.maxMotorTorque = flFriction;
         return b3CreateSphericalJoint(world, &def);
     };
-    return FinishConstraint(new Box3DPhysicsConstraint(this, pRef, pAtt), pGroup, ragdoll.constraint, build);
+    Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Ragdoll, &ragdoll, sizeof(ragdoll));
+    return FinishConstraint(pConstraint, pGroup, ragdoll.constraint, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreatePulleyConstraint(
@@ -606,6 +618,7 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreatePulleyConstraint(
                                     SourceToBox::Distance(pulley.objectPosition[1]) };
     pConstraint->SetupPulley(
         pulleyWorld, localAttach, SourceToBox::Distance(pulley.totalLength), pulley.gearRatio, pulley.isRigid);
+    pConstraint->SetSaveInfo(kBox3DConstraint_Pulley, &pulley, sizeof(pulley));
     m_Pulleys.AddToTail(pConstraint);
 
     return FinishConstraint(pConstraint, pGroup, pulley.constraint, std::function<b3JointId()>());
@@ -768,6 +781,7 @@ IPhysicsSpring* Box3DPhysicsEnvironment::CreateSpring(
         return nullptr;
     Box3DPhysicsSpring* pSpring = new Box3DPhysicsSpring(
         this, static_cast<Box3DPhysicsObject*>(pObjectStart), static_cast<Box3DPhysicsObject*>(pObjectEnd), pParams);
+    pSpring->SetSaveParams(*pParams);
     m_Springs.AddToTail(pSpring);
     return pSpring;
 }

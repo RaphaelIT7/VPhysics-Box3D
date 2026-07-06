@@ -907,26 +907,311 @@ void Box3DPhysicsEnvironment::EnableDeleteQueue(bool enable)
     m_bDeleteQueueEnabled = enable;
 }
 
+// Build the object from its saved state. Shared by the save-game and prediction-buffer restore paths.
+static IPhysicsObject* RestoreObjectFromState(
+    Box3DPhysicsEnvironment* pEnv, const Box3DSavedObjectState& state, const CPhysCollide* pCollide, void* pGameData,
+    const char* pName)
+{
+    objectparams_t op = {};
+    op.mass = state.mass;
+    op.damping = state.linearDamping;
+    op.rotdamping = state.angularDamping;
+    op.dragCoefficient = state.dragCoefficient;
+    op.volume = state.volume;
+    op.pGameData = pGameData;
+    op.pName = pName;
+    Vector com = state.massCenter;
+    op.massCenterOverride = &com;
+
+    IPhysicsObject* pObj = state.sphereRadius > 0.0f
+        ? pEnv->CreateSphereObject(state.sphereRadius, state.materialIndex, state.position, state.angles, &op, state.bStatic)
+        : pEnv->CreateObject(pCollide, state.materialIndex, state.position, state.angles, &op, state.bStatic);
+    if (pObj)
+        static_cast<Box3DPhysicsObject*>(pObj)->ApplyRestoreState(state);
+    return pObj;
+}
+
+static void SaveWritePtr(ISave* pSave, const void* p)
+{
+    const uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    pSave->WriteData(reinterpret_cast<const char*>(&v), sizeof(v));
+}
+static uintptr_t SaveReadPtr(IRestore* pRestore)
+{
+    uintptr_t v = 0;
+    pRestore->ReadData(reinterpret_cast<char*>(&v), sizeof(v), sizeof(v));
+    return v;
+}
+
+// Persist objects/constraints/springs/controllers through the ISave stream so they rebuild on load. Objects
+// write their old pointer; anything that references bodies or a group relinks through that map on restore.
+// Vehicles (unimplemented) and any other type are the game's to recreate.
 bool Box3DPhysicsEnvironment::Save(const physsaveparams_t& params)
 {
-    Log_Stub(LOG_VBox3D);
-    return false;
+    if (!params.pSave || !params.pObject)
+        return false;
+    ISave* pSave = params.pSave;
+    const int version = kBox3DSaveVersion;
+
+    switch (params.type)
+    {
+        case PIID_IPHYSICSOBJECT:
+        {
+            Box3DSavedObjectState state;
+            static_cast<Box3DPhysicsObject*>(params.pObject)->FillSaveState(state);
+            pSave->WriteInt(&version);
+            SaveWritePtr(pSave, params.pObject);
+            pSave->WriteData(reinterpret_cast<const char*>(&state), sizeof(state));
+            return true;
+        }
+        case PIID_IPHYSICSCONSTRAINT:
+        {
+            Box3DPhysicsConstraint* pC = static_cast<Box3DPhysicsConstraint*>(params.pObject);
+            const int kind = pC->GetSaveKind();
+            if (kind == kBox3DConstraint_None || pC->IsBroken())
+                return false; // nothing we can rebuild, or already broken
+            const Box3DConstraintParams& sp = pC->GetSaveParams();
+            pSave->WriteInt(&version);
+            pSave->WriteInt(&kind);
+            SaveWritePtr(pSave, pC);
+            SaveWritePtr(pSave, pC->GetReferenceObject());
+            SaveWritePtr(pSave, pC->GetAttachedObject());
+            SaveWritePtr(pSave, pC->GetGroup());
+            pSave->WriteData(reinterpret_cast<const char*>(&sp), sizeof(sp));
+            return true;
+        }
+        case PIID_IPHYSICSCONSTRAINTGROUP:
+        {
+            constraint_groupparams_t gp;
+            static_cast<Box3DPhysicsConstraintGroup*>(params.pObject)->GetErrorParams(&gp);
+            pSave->WriteInt(&version);
+            SaveWritePtr(pSave, params.pObject);
+            pSave->WriteData(reinterpret_cast<const char*>(&gp), sizeof(gp));
+            return true;
+        }
+        case PIID_IPHYSICSSPRING:
+        {
+            Box3DPhysicsSpring* pS = static_cast<Box3DPhysicsSpring*>(params.pObject);
+            const springparams_t& sp = pS->GetSaveParams();
+            pSave->WriteInt(&version);
+            SaveWritePtr(pSave, pS->GetStartObject());
+            SaveWritePtr(pSave, pS->GetEndObject());
+            pSave->WriteData(reinterpret_cast<const char*>(&sp), sizeof(sp));
+            return true;
+        }
+        case PIID_IPHYSICSFLUIDCONTROLLER:
+        {
+            Box3DPhysicsFluidController* pF = static_cast<Box3DPhysicsFluidController*>(params.pObject);
+            const fluidparams_t& fp = pF->GetSaveParams();
+            pSave->WriteInt(&version);
+            SaveWritePtr(pSave, pF->GetFluidObject());
+            pSave->WriteData(reinterpret_cast<const char*>(&fp), sizeof(fp));
+            return true;
+        }
+        case PIID_IPHYSICSSHADOWCONTROLLER:
+        {
+            Box3DPhysicsShadowController* pSh = static_cast<Box3DPhysicsShadowController*>(params.pObject);
+            const bool allow[2] = { pSh->AllowsTranslation(), pSh->AllowsRotation() };
+            pSave->WriteInt(&version);
+            SaveWritePtr(pSave, pSh->GetObject());
+            pSave->WriteData(reinterpret_cast<const char*>(allow), sizeof(allow));
+            return true;
+        }
+        case PIID_IPHYSICSMOTIONCONTROLLER:
+        {
+            Box3DPhysicsMotionController* pM = static_cast<Box3DPhysicsMotionController*>(params.pObject);
+            const int count = pM->CountObjects();
+            pSave->WriteInt(&version);
+            pSave->WriteInt(&count);
+            CUtlVector<IPhysicsObject*> objs;
+            objs.SetCount(count);
+            if (count > 0)
+                pM->GetObjects(objs.Base());
+            for (int i = 0; i < count; i++)
+                SaveWritePtr(pSave, objs[i]);
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 
 void Box3DPhysicsEnvironment::PreRestore(const physprerestoreparams_t& params)
 {
-    Log_Stub(LOG_VBox3D);
+    m_SaveRestoreMap.clear();
 }
 
 bool Box3DPhysicsEnvironment::Restore(const physrestoreparams_t& params)
 {
-    Log_Stub(LOG_VBox3D);
-    return false;
+    if (!params.pRestore || !params.ppObject)
+        return false;
+    switch (params.type) // only our types have a block in the stream
+    {
+        case PIID_IPHYSICSOBJECT:
+        case PIID_IPHYSICSCONSTRAINT:
+        case PIID_IPHYSICSCONSTRAINTGROUP:
+        case PIID_IPHYSICSSPRING:
+        case PIID_IPHYSICSFLUIDCONTROLLER:
+        case PIID_IPHYSICSSHADOWCONTROLLER:
+        case PIID_IPHYSICSMOTIONCONTROLLER:
+            break;
+        default:
+            return false;
+    }
+
+    IRestore* pRestore = params.pRestore;
+    if (pRestore->ReadInt() != kBox3DSaveVersion)
+        return false; // unknown format: let the game recreate from the entity's own saved state
+
+    const auto lookup = [this](uintptr_t old) -> void* {
+        if (!old)
+            return nullptr;
+        const auto it = m_SaveRestoreMap.find(old);
+        return it != m_SaveRestoreMap.end() ? it->second : nullptr;
+    };
+
+    switch (params.type)
+    {
+        case PIID_IPHYSICSOBJECT:
+        {
+            const uintptr_t oldPtr = SaveReadPtr(pRestore);
+            Box3DSavedObjectState state;
+            pRestore->ReadData(reinterpret_cast<char*>(&state), sizeof(state), sizeof(state));
+            IPhysicsObject* pObj = RestoreObjectFromState(this, state, params.pCollisionModel, params.pGameData, params.pName);
+            if (!pObj)
+                return false;
+            m_SaveRestoreMap[oldPtr] = pObj;
+            *params.ppObject = pObj;
+            return true;
+        }
+        case PIID_IPHYSICSCONSTRAINT:
+        {
+            const int kind = pRestore->ReadInt();
+            const uintptr_t oldC = SaveReadPtr(pRestore);
+            const uintptr_t oldRef = SaveReadPtr(pRestore);
+            const uintptr_t oldAtt = SaveReadPtr(pRestore);
+            const uintptr_t oldGroup = SaveReadPtr(pRestore);
+            Box3DConstraintParams cp;
+            pRestore->ReadData(reinterpret_cast<char*>(&cp), sizeof(cp), sizeof(cp));
+
+            IPhysicsObject* pRef = static_cast<IPhysicsObject*>(lookup(oldRef));
+            IPhysicsObject* pAtt = static_cast<IPhysicsObject*>(lookup(oldAtt));
+            if (!pRef || !pAtt)
+                return false; // a referenced body wasn't restored: let the game recreate it
+            IPhysicsConstraintGroup* pGroup = static_cast<IPhysicsConstraintGroup*>(lookup(oldGroup));
+
+            IPhysicsConstraint* pC = nullptr;
+            switch (kind)
+            {
+                case kBox3DConstraint_Ragdoll:
+                    pC = CreateRagdollConstraint(pRef, pAtt, pGroup, cp.ragdoll);
+                    break;
+                case kBox3DConstraint_Hinge:
+                    pC = CreateHingeConstraint(pRef, pAtt, pGroup, cp.hinge);
+                    break;
+                case kBox3DConstraint_Fixed:
+                    pC = CreateFixedConstraint(pRef, pAtt, pGroup, cp.fixed);
+                    break;
+                case kBox3DConstraint_Sliding:
+                    pC = CreateSlidingConstraint(pRef, pAtt, pGroup, cp.sliding);
+                    break;
+                case kBox3DConstraint_Ballsocket:
+                    pC = CreateBallsocketConstraint(pRef, pAtt, pGroup, cp.ballsocket);
+                    break;
+                case kBox3DConstraint_Pulley:
+                    pC = CreatePulleyConstraint(pRef, pAtt, pGroup, cp.pulley);
+                    break;
+                case kBox3DConstraint_Length:
+                    pC = CreateLengthConstraint(pRef, pAtt, pGroup, cp.length);
+                    break;
+                default:
+                    return false;
+            }
+            if (!pC)
+                return false;
+            m_SaveRestoreMap[oldC] = pC;
+            *params.ppObject = pC;
+            return true;
+        }
+        case PIID_IPHYSICSCONSTRAINTGROUP:
+        {
+            const uintptr_t oldG = SaveReadPtr(pRestore);
+            constraint_groupparams_t gp;
+            pRestore->ReadData(reinterpret_cast<char*>(&gp), sizeof(gp), sizeof(gp));
+            IPhysicsConstraintGroup* pG = CreateConstraintGroup(gp);
+            if (!pG)
+                return false;
+            m_SaveRestoreMap[oldG] = pG;
+            *params.ppObject = pG;
+            return true;
+        }
+        case PIID_IPHYSICSSPRING:
+        {
+            const uintptr_t oldStart = SaveReadPtr(pRestore);
+            const uintptr_t oldEnd = SaveReadPtr(pRestore);
+            springparams_t sp;
+            pRestore->ReadData(reinterpret_cast<char*>(&sp), sizeof(sp), sizeof(sp));
+            IPhysicsObject* pStart = static_cast<IPhysicsObject*>(lookup(oldStart));
+            IPhysicsObject* pEnd = static_cast<IPhysicsObject*>(lookup(oldEnd));
+            if (!pStart || !pEnd)
+                return false;
+            IPhysicsSpring* pS = CreateSpring(pStart, pEnd, &sp);
+            if (!pS)
+                return false;
+            *params.ppObject = pS;
+            return true;
+        }
+        case PIID_IPHYSICSFLUIDCONTROLLER:
+        {
+            const uintptr_t oldObj = SaveReadPtr(pRestore);
+            fluidparams_t fp;
+            pRestore->ReadData(reinterpret_cast<char*>(&fp), sizeof(fp), sizeof(fp));
+            fp.pGameData = params.pGameData; // the saved pointer is stale; the entity is the live game data
+            IPhysicsObject* pObj = static_cast<IPhysicsObject*>(lookup(oldObj));
+            if (!pObj)
+                return false;
+            IPhysicsFluidController* pF = CreateFluidController(pObj, &fp);
+            if (!pF)
+                return false;
+            *params.ppObject = pF;
+            return true;
+        }
+        case PIID_IPHYSICSSHADOWCONTROLLER:
+        {
+            const uintptr_t oldObj = SaveReadPtr(pRestore);
+            bool allow[2] = { false, false };
+            pRestore->ReadData(reinterpret_cast<char*>(allow), sizeof(allow), sizeof(allow));
+            IPhysicsObject* pObj = static_cast<IPhysicsObject*>(lookup(oldObj));
+            if (!pObj)
+                return false;
+            IPhysicsShadowController* pSh = CreateShadowController(pObj, allow[0], allow[1]);
+            if (!pSh)
+                return false;
+            *params.ppObject = pSh;
+            return true;
+        }
+        case PIID_IPHYSICSMOTIONCONTROLLER:
+        {
+            const int count = pRestore->ReadInt();
+            IPhysicsMotionController* pM = CreateMotionController(nullptr); // the game re-wires the handler
+            if (!pM)
+                return false;
+            for (int i = 0; i < count; i++)
+            {
+                if (IPhysicsObject* pObj = static_cast<IPhysicsObject*>(lookup(SaveReadPtr(pRestore))))
+                    pM->AttachObject(pObj, false);
+            }
+            *params.ppObject = pM;
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 
 void Box3DPhysicsEnvironment::PostRestore()
 {
-    Log_Stub(LOG_VBox3D);
+    m_SaveRestoreMap.clear();
 }
 
 bool Box3DPhysicsEnvironment::IsCollisionModelUsed(CPhysCollide* pCollide) const
@@ -969,22 +1254,60 @@ void Box3DPhysicsEnvironment::ClearStats()
     Log_Stub(LOG_VBox3D);
 }
 
+// Raw-buffer serialization (clientside prediction). Same object state, but same-process so the collision
+// model is smuggled in as a pointer rather than supplied by the caller.
+namespace
+{
+    constexpr unsigned int kBufferHeader = sizeof(int) + sizeof(const CPhysCollide*);
+}
+
 unsigned int Box3DPhysicsEnvironment::GetObjectSerializeSize(IPhysicsObject* pObject) const
 {
-    Log_Stub(LOG_VBox3D);
-    return 0;
+    return kBufferHeader + sizeof(Box3DSavedObjectState);
 }
 
 void Box3DPhysicsEnvironment::SerializeObjectToBuffer(IPhysicsObject* pObject, unsigned char* pBuffer, unsigned int bufferSize)
 {
-    Log_Stub(LOG_VBox3D);
+    if (!pObject || !pBuffer || bufferSize < kBufferHeader + sizeof(Box3DSavedObjectState))
+        return;
+
+    Box3DPhysicsObject* pObj = static_cast<Box3DPhysicsObject*>(pObject);
+    const int version = kBox3DSaveVersion;
+    const CPhysCollide* pCollide = pObj->GetCollide();
+    Box3DSavedObjectState state;
+    pObj->FillSaveState(state);
+
+    unsigned char* p = pBuffer;
+    memcpy(p, &version, sizeof(version));
+    p += sizeof(version);
+    memcpy(p, &pCollide, sizeof(pCollide));
+    p += sizeof(pCollide);
+    memcpy(p, &state, sizeof(state));
 }
 
 IPhysicsObject* Box3DPhysicsEnvironment::UnserializeObjectFromBuffer(
     void* pGameData, unsigned char* pBuffer, unsigned int bufferSize, bool enableCollisions)
 {
-    Log_Stub(LOG_VBox3D);
-    return nullptr;
+    if (!pBuffer || bufferSize < kBufferHeader + sizeof(Box3DSavedObjectState))
+        return nullptr;
+
+    const unsigned char* p = pBuffer;
+    int version;
+    memcpy(&version, p, sizeof(version));
+    p += sizeof(version);
+    if (version != kBox3DSaveVersion)
+        return nullptr;
+
+    const CPhysCollide* pCollide;
+    memcpy(&pCollide, p, sizeof(pCollide));
+    p += sizeof(pCollide);
+    Box3DSavedObjectState state;
+    memcpy(&state, p, sizeof(state));
+
+    IPhysicsObject* pObj = RestoreObjectFromState(this, state, pCollide, pGameData, nullptr);
+    if (pObj)
+        pObj->EnableCollisions(enableCollisions);
+    return pObj;
 }
 
 void Box3DPhysicsEnvironment::EnableConstraintNotify(bool bEnable)

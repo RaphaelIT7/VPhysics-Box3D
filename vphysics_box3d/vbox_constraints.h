@@ -8,11 +8,44 @@
 
 #include "vbox_interface.h"
 
+#include <cstring>
 #include <functional>
 
 class Box3DPhysicsObject;
 class Box3DPhysicsEnvironment;
 class Box3DPhysicsConstraintGroup;
+
+// Source constraint type + original params, so save/restore rebuilds via the same CreateXConstraint path.
+enum Box3DConstraintKind
+{
+    kBox3DConstraint_None = 0,
+    kBox3DConstraint_Ragdoll,
+    kBox3DConstraint_Hinge,
+    kBox3DConstraint_Fixed,
+    kBox3DConstraint_Sliding,
+    kBox3DConstraint_Ballsocket,
+    kBox3DConstraint_Pulley,
+    kBox3DConstraint_Length,
+};
+
+union Box3DConstraintParams
+{
+    // Members carry default initializers, so the union needs explicit no-op special members; it is only ever
+    // filled as a byte blob.
+    Box3DConstraintParams()
+    {
+    }
+    ~Box3DConstraintParams()
+    {
+    }
+    constraint_ragdollparams_t ragdoll;
+    constraint_hingeparams_t hinge;
+    constraint_fixedparams_t fixed;
+    constraint_slidingparams_t sliding;
+    constraint_ballsocketparams_t ballsocket;
+    constraint_pulleyparams_t pulley;
+    constraint_lengthparams_t length;
+};
 
 // Box3D joints have no enable flag, so Activate/Deactivate rebuild/destroy the joint via a stored closure.
 class Box3DPhysicsConstraint final : public IPhysicsConstraint
@@ -51,6 +84,10 @@ public:
     {
         m_pGroup = pGroup;
     }
+    Box3DPhysicsConstraintGroup* GetGroup() const
+    {
+        return m_pGroup;
+    }
     b3JointId GetJointId() const
     {
         return m_JointId;
@@ -65,6 +102,25 @@ public:
     void SetBreakParams(const constraint_breakableparams_t& params)
     {
         m_BreakParams = params;
+    }
+
+    // Remember the source constraint type + params so save/restore can rebuild it via CreateXConstraint.
+    void SetSaveInfo(Box3DConstraintKind kind, const void* pParams, int nSize)
+    {
+        m_SaveKind = kind;
+        memcpy(&m_SaveParams, pParams, (size_t)nSize);
+    }
+    Box3DConstraintKind GetSaveKind() const
+    {
+        return m_SaveKind;
+    }
+    bool IsBroken() const
+    {
+        return m_bBroken;
+    }
+    const Box3DConstraintParams& GetSaveParams() const
+    {
+        return m_SaveParams;
     }
 
     // Pulley: Box3D has no pulley joint, so it is solved as a per-step impulse constraint coupling the two
@@ -97,6 +153,9 @@ private:
     float m_flPulleyTotalLength = 0.0f;
     float m_flPulleyGearRatio = 1.0f;
     bool m_bPulleyRigid = false;
+
+    Box3DConstraintKind m_SaveKind = kBox3DConstraint_None;
+    Box3DConstraintParams m_SaveParams{};
 };
 
 // A Source spring on a Box3D distance joint with a soft spring.
@@ -117,12 +176,22 @@ public:
 
     void NotifyObjectDestroyed(Box3DPhysicsObject* pObject);
 
+    void SetSaveParams(const springparams_t& params)
+    {
+        m_SaveParams = params;
+    }
+    const springparams_t& GetSaveParams() const
+    {
+        return m_SaveParams;
+    }
+
 private:
     void PushSpringSettings();
 
     Box3DPhysicsEnvironment* m_pEnvironment;
     Box3DPhysicsObject* m_pStart;
     Box3DPhysicsObject* m_pEnd;
+    springparams_t m_SaveParams = {};
     b3JointId m_JointId = b3_nullJointId;
     b3Vec3 m_AnchorStart; // body-local anchor points, for GetEndpoints
     b3Vec3 m_AnchorEnd;

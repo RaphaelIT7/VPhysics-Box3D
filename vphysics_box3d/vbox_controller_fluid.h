@@ -27,6 +27,10 @@ public:
     {
         return m_pFluidObject;
     }
+    const fluidparams_t& GetSaveParams() const
+    {
+        return m_Params;
+    }
 
 private:
     cplane_t GetWorldSurfacePlane() const;
