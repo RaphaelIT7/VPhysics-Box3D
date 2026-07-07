@@ -532,9 +532,18 @@ void Box3DPhysicsEnvironment::Simulate(float deltaTime)
     for (int i = 0; i < m_FluidControllers.Count(); i++)
         m_FluidControllers[i]->OnPreSimulate(deltaTime);
 
-    // IVP actuators run within the PSI: springs apply before the step.
+    // IVP actuators/constraints run within the PSI: apply pre-step so the solver integrates them.
     for (int i = 0; i < m_Springs.Count(); i++)
         m_Springs[i]->Simulate(deltaTime);
+    // Iterated so a bone chain's limits converge together (Havana solves them jointly in the LCS).
+    for (int nIter = 0; nIter < 4; nIter++)
+    {
+        for (int i = 0; i < m_Pulleys.Count(); i++)
+        {
+            if (m_Pulleys[i]->IsAngularLimits())
+                m_Pulleys[i]->SolveAngularLimits(deltaTime, nIter == 0);
+        }
+    }
 
     // The solver overwrites velocities; the pre-step values are what impact damage measures against.
     for (int i = 0; i < m_Objects.Count(); i++)

@@ -200,6 +200,206 @@ void Box3DPhysicsConstraint::SolvePulley(float dt)
     }
 }
 
+void Box3DPhysicsConstraint::SetupAngularLimits(
+    const b3Transform& frameRef, const b3Transform& frameAtt, bool bCone, float coneAngle, bool bTwist, float twistMin,
+    float twistMax, float flFriction, bool bHasJoint)
+{
+    m_bAngularLimits = true;
+    m_AngFrameRef = frameRef.q;
+    m_AngFrameAtt = frameAtt.q;
+    m_AngAnchorRef = frameRef.p;
+    m_AngAnchorAtt = frameAtt.p;
+    m_bAngHasJoint = bHasJoint;
+    m_bAngCone = bCone;
+    m_flAngCone = coneAngle;
+    m_bAngTwist = bTwist;
+    m_flAngTwistMin = twistMin;
+    m_flAngTwistMax = twistMax;
+    m_flAngFriction = flFriction;
+}
+
+static b3Vec3 AnchorRelativeVelocity(b3BodyId ref, b3BodyId att, const b3Vec3& anchorRefLocal, const b3Vec3& anchorAttLocal)
+{
+    const b3Pos worldRef = b3TransformWorldPoint(b3Body_GetTransform(ref), anchorRefLocal);
+    const b3Pos worldAtt = b3TransformWorldPoint(b3Body_GetTransform(att), anchorAttLocal);
+    return b3Sub(b3Body_GetWorldPointVelocity(att, worldAtt), b3Body_GetWorldPointVelocity(ref, worldRef));
+}
+
+// Restore the anchor velocity to its pre-impulse value so angular corrections become rotation about
+// the joint instead of being cancelled by the island's point-lock (Havana solves these jointly).
+static void RepinAnchorVelocity(
+    b3BodyId ref, b3BodyId att, const b3Vec3& anchorRefLocal, const b3Vec3& anchorAttLocal, const b3Vec3& vRelTarget)
+{
+    const b3WorldTransform xfRef = b3Body_GetTransform(ref);
+    const b3WorldTransform xfAtt = b3Body_GetTransform(att);
+    const b3Pos worldRef = b3TransformWorldPoint(xfRef, anchorRefLocal);
+    const b3Pos worldAtt = b3TransformWorldPoint(xfAtt, anchorAttLocal);
+    const b3Matrix3 invIRef = b3Body_GetWorldInverseRotationalInertia(ref);
+    const b3Matrix3 invIAtt = b3Body_GetWorldInverseRotationalInertia(att);
+    const b3Vec3 rRef = b3SubPos(worldRef, b3Body_GetWorldCenter(ref));
+    const b3Vec3 rAtt = b3SubPos(worldAtt, b3Body_GetWorldCenter(att));
+    const float flInvMass = b3Body_GetInverseMass(ref) + b3Body_GetInverseMass(att);
+
+    for (int i = 0; i < 4; i++)
+    {
+        const b3Vec3 vRel = b3Sub(
+            b3Sub(b3Body_GetWorldPointVelocity(att, worldAtt), b3Body_GetWorldPointVelocity(ref, worldRef)), vRelTarget);
+        const float flLen = b3Length(vRel);
+        if (flLen < 1e-4f)
+            break;
+        const b3Vec3 dir = b3MulSV(1.0f / flLen, vRel);
+        const b3Vec3 crossRef = b3Cross(rRef, dir);
+        const b3Vec3 crossAtt = b3Cross(rAtt, dir);
+        const float flK = flInvMass + b3Dot(crossRef, b3MulMV(invIRef, crossRef)) + b3Dot(crossAtt, b3MulMV(invIAtt, crossAtt));
+        if (flK <= 1e-9f)
+            break;
+        const b3Vec3 impulse = b3MulSV(-flLen / flK, dir);
+        b3Body_ApplyLinearImpulse(att, impulse, worldAtt, true);
+        b3Body_ApplyLinearImpulse(ref, b3MulSV(-1.0f, impulse), worldRef, true);
+    }
+}
+
+// Havana joint friction: a position servo on a reference angle that slips when the clamp engages.
+static float SolveAngularFrictionImpulse(
+    b3BodyId ref, b3BodyId att, const b3Vec3& axis, float flAlpha, float flRefPos, float flFriction, float dt)
+{
+    const b3Matrix3 invIRef = b3Body_GetWorldInverseRotationalInertia(ref);
+    const b3Matrix3 invIAtt = b3Body_GetWorldInverseRotationalInertia(att);
+    const float flK = b3Dot(axis, b3MulMV(invIRef, axis)) + b3Dot(axis, b3MulMV(invIAtt, axis));
+    if (flK <= 1e-9f)
+        return flRefPos;
+
+    const float flVel = b3Dot(axis, b3Sub(b3Body_GetAngularVelocity(att), b3Body_GetAngularVelocity(ref)));
+    const float flDAlpha = flRefPos - flAlpha;
+    const float flCorrection = flDAlpha * 0.8f / dt - flVel; // friction_tau 0.8, friction_damp 1.0
+    float flImpulse = flCorrection / flK;
+
+    const float flMaxImpulse = flFriction * dt;
+    if (fabsf(flImpulse) > flMaxImpulse)
+    {
+        const float flFactor = flMaxImpulse / fabsf(flImpulse);
+        flImpulse *= flFactor;
+        flRefPos -= (1.0f - flFactor) * flDAlpha; // slip toward the actual angle
+    }
+
+    b3Body_ApplyAngularImpulse(att, b3MulSV(flImpulse, axis), true);
+    b3Body_ApplyAngularImpulse(ref, b3MulSV(-flImpulse, axis), true);
+    return flRefPos;
+}
+
+// Havana limit: one predictive impulse, ((alpha + vel*dt) - limit) / (dt * K); never brakes inward motion.
+static void SolveAngularLimitImpulse(
+    b3BodyId ref, b3BodyId att, const b3Vec3& axis, float flAlpha, float flMin, float flMax, float flTau, float dt)
+{
+    const b3Matrix3 invIRef = b3Body_GetWorldInverseRotationalInertia(ref);
+    const b3Matrix3 invIAtt = b3Body_GetWorldInverseRotationalInertia(att);
+    const float flK = b3Dot(axis, b3MulMV(invIRef, axis)) + b3Dot(axis, b3MulMV(invIAtt, axis));
+    if (flK <= 1e-9f)
+        return;
+
+    const float flVel = b3Dot(axis, b3Sub(b3Body_GetAngularVelocity(att), b3Body_GetAngularVelocity(ref)));
+    const float flNext = flAlpha + flVel * dt;
+    float flImpulse = 0.0f; // about +axis
+    if (flNext > flMax)
+        flImpulse = -flTau * (flNext - flMax) / (dt * flK);
+    else if (flNext < flMin)
+        flImpulse = -flTau * (flNext - flMin) / (dt * flK);
+    if (flImpulse != 0.0f)
+    {
+        b3Body_ApplyAngularImpulse(att, b3MulSV(flImpulse, axis), true);
+        b3Body_ApplyAngularImpulse(ref, b3MulSV(-flImpulse, axis), true);
+    }
+}
+
+// Friction servo first (once per tick), then limits; twist unwrapped so forcing past pi never flips.
+void Box3DPhysicsConstraint::SolveAngularLimits(float dt, bool bApplyFriction)
+{
+    if (!m_bAngularLimits || m_bBroken || !m_pReference || !m_pAttached || dt <= 0.0f)
+        return;
+
+    const b3BodyId ref = m_pReference->GetBodyID();
+    const b3BodyId att = m_pAttached->GetBodyID();
+    if (!b3Body_IsAwake(ref) && !b3Body_IsAwake(att))
+        return;
+
+    const b3Quat qRef = b3MulQuat(BodyRotation(ref), m_AngFrameRef);
+    const b3Quat qAtt = b3MulQuat(BodyRotation(att), m_AngFrameAtt);
+    const b3Vec3 xRef = b3RotateVector(qRef, b3Vec3_axisX); // twist axes
+    const b3Vec3 xAtt = b3RotateVector(qAtt, b3Vec3_axisX);
+
+    const bool bFriction = bApplyFriction && m_flAngFriction > 0.0f;
+
+    const b3Vec3 vAnchorBefore = m_bAngHasJoint ? AnchorRelativeVelocity(ref, att, m_AngAnchorRef, m_AngAnchorAtt) : b3Vec3{};
+
+    if (m_bAngCone)
+    {
+        // Swing: angle between the twist axes, growing about +cross(xRef, xAtt). Cone is a max-only limit.
+        const b3Vec3 crossRA = b3Cross(xRef, xAtt);
+        const float flCrossLen = b3Length(crossRA);
+        if (flCrossLen > 1e-6f)
+        {
+            const b3Vec3 axis = b3MulSV(1.0f / flCrossLen, crossRA);
+            const float flSwing = atan2f(flCrossLen, b3Dot(xAtt, xRef));
+            if (bFriction)
+            {
+                if (!m_bFrictionInit)
+                    m_flFrictionRefSwing = flSwing;
+                m_flFrictionRefSwing = SolveAngularFrictionImpulse(
+                    ref, att, axis, flSwing, m_flFrictionRefSwing, m_flAngFriction, dt);
+            }
+            SolveAngularLimitImpulse(ref, att, axis, flSwing, -M_PI_F, m_flAngCone, 1.0f, dt);
+        }
+    }
+
+    // Twist about the bisector with tau = cos(swing/2), fading out at the pole (Havana ragdoll twist).
+    const b3Vec3 axisSum = b3Add(xRef, xAtt);
+    const float flSumLenSq = b3Dot(axisSum, axisSum);
+    if (m_bAngTwist && flSumLenSq > 1e-4f)
+    {
+        b3Quat qRel = b3InvMulQuat(qRef, qAtt);
+        if (qRel.s < 0.0f)
+        {
+            // Canonicalize: q and -q are the same rotation, and 2*atan2 spans (-2pi, 2pi] otherwise.
+            qRel.s = -qRel.s;
+            qRel.v = b3MulSV(-1.0f, qRel.v);
+        }
+        const float flRaw = 2.0f * atan2f(qRel.v.x, qRel.s); // wrapped [-pi, pi]
+        if (!m_bTwistInit)
+        {
+            m_bTwistInit = true;
+            m_flTwistUnwrapped = flRaw;
+        }
+        else
+        {
+            float flDelta = flRaw - m_flTwistLastRaw;
+            if (flDelta > M_PI_F)
+                flDelta -= 2.0f * M_PI_F;
+            else if (flDelta < -M_PI_F)
+                flDelta += 2.0f * M_PI_F;
+            m_flTwistUnwrapped += flDelta;
+        }
+        m_flTwistLastRaw = flRaw;
+
+        const float flSumLen = sqrtf(flSumLenSq);
+        const b3Vec3 twistAxis = b3MulSV(1.0f / flSumLen, axisSum);
+        const float flTwistTau = 0.5f * flSumLen; // cos(swing/2)
+        if (bFriction)
+        {
+            if (!m_bFrictionInit)
+                m_flFrictionRefTwist = m_flTwistUnwrapped;
+            m_flFrictionRefTwist = SolveAngularFrictionImpulse(
+                ref, att, twistAxis, m_flTwistUnwrapped, m_flFrictionRefTwist, m_flAngFriction, dt);
+        }
+        SolveAngularLimitImpulse(ref, att, twistAxis, m_flTwistUnwrapped, m_flAngTwistMin, m_flAngTwistMax, flTwistTau, dt);
+    }
+
+    if (bFriction)
+        m_bFrictionInit = true;
+
+    if (m_bAngHasJoint)
+        RepinAnchorVelocity(ref, att, m_AngAnchorRef, m_AngAnchorAtt, vAnchorBefore);
+}
+
 void Box3DPhysicsConstraint::Deactivate()
 {
     DestroyJoint();
@@ -240,22 +440,33 @@ void Box3DPhysicsConstraint::SetLinearMotor(float speed, float maxLinearImpulse)
 
 void Box3DPhysicsConstraint::SetAngularMotor(float rotSpeed, float maxAngularImpulse)
 {
+    // Retail: update_friction(ConvertAngleToIVP(f)), speed-0 path only.
+    if (m_bAngularLimits)
+    {
+        if (rotSpeed == 0.0f)
+            m_flAngFriction = DEG2RAD(fabsf(maxAngularImpulse));
+        return;
+    }
+
     if (!b3Joint_IsValid(m_JointId))
         return;
 
-    const float flSpeed = DEG2RAD(rotSpeed);
-    const float flMaxTorque = fabsf(maxAngularImpulse);
     switch (b3Joint_GetType(m_JointId))
     {
         case b3_revoluteJoint:
-            b3RevoluteJoint_EnableMotor(m_JointId, rotSpeed != 0.0f);
-            b3RevoluteJoint_SetMotorSpeed(m_JointId, flSpeed);
-            b3RevoluteJoint_SetMaxMotorTorque(m_JointId, flMaxTorque);
+            // Speed 0 with torque is a friction brake; speed negated for the clockwise flip.
+            b3RevoluteJoint_EnableMotor(m_JointId, maxAngularImpulse != 0.0f);
+            b3RevoluteJoint_SetMotorSpeed(m_JointId, DEG2RAD(-rotSpeed));
+            b3RevoluteJoint_SetMaxMotorTorque(m_JointId, fabsf(DEG2RAD(maxAngularImpulse)));
             break;
         case b3_sphericalJoint:
-            b3SphericalJoint_EnableMotor(m_JointId, rotSpeed != 0.0f);
-            b3SphericalJoint_SetMotorVelocity(m_JointId, b3Vec3{ flSpeed, flSpeed, flSpeed });
-            b3SphericalJoint_SetMaxMotorTorque(m_JointId, flMaxTorque);
+            // Retail only updates ragdoll friction here, and only for speed 0.
+            if (rotSpeed == 0.0f)
+            {
+                b3SphericalJoint_EnableMotor(m_JointId, maxAngularImpulse != 0.0f);
+                b3SphericalJoint_SetMotorVelocity(m_JointId, b3Vec3{ 0.0f, 0.0f, 0.0f });
+                b3SphericalJoint_SetMaxMotorTorque(m_JointId, fabsf(DEG2RAD(maxAngularImpulse)));
+            }
             break;
         default:
             break;
@@ -318,7 +529,7 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateFixedConstraint(
     const b3WorldId world = m_WorldId;
     const b3BodyId ref = pRef->GetBodyID(), att = pAtt->GetBodyID();
 
-	// Weld at the game's designed attached->ref pose (attachedRefXform), not the live pose. frameA is the
+    // Weld at the game's designed attached->ref pose (attachedRefXform), not the live pose. frameA is the
     // reference origin; frameB is its inverse.
     const b3Transform relative = SourceToBox::Transform(fixed.attachedRefXform);
     b3Transform frameA = b3Transform_identity;
@@ -525,9 +736,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
     const b3Transform frameRef = SourceToBox::Transform(ragdoll.constraintToReference);
     const b3Transform frameAtt = SourceToBox::Transform(ragdoll.constraintToAttached);
 
-    // Per-axis limits (radians) with Source's clockwise flip; an axis is a DOF if its range exceeds 5deg.
-    // Axis 0 is twist, 1/2 are swing.
+    // Clockwise flip; a DOF when min != max (retail), FREE when full circle. Axis 0 twist, 1/2 swing.
     float flMin[3], flMax[3];
+    bool bFree[3];
     int nDOF = 0, nDofAxis = 0;
     for (int i = 0; i < 3; i++)
     {
@@ -541,27 +752,35 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
             flMin[i] = DEG2RAD(ragdoll.axes[i].minRotation);
             flMax[i] = DEG2RAD(ragdoll.axes[i].maxRotation);
         }
-        if (flMax[i] - flMin[i] > DEG2RAD(5.0f))
+        bFree[i] = (ragdoll.axes[i].maxRotation - ragdoll.axes[i].minRotation) >= 359.0f;
+        if (ragdoll.axes[i].minRotation != ragdoll.axes[i].maxRotation)
         {
             nDOF++;
             nDofAxis = i;
         }
     }
 
-    const float flLimit = 0.99f * M_PI_F;
-    const float flCone = clamp(Max(0.5f * (flMax[1] - flMin[1]), 0.5f * (flMax[2] - flMin[2])), 0.0f, M_PI_F);
-    // One isotropic motor torque, so use the strongest axis (the average dilutes a 1-DOF joint); axis torque
-    // is HL units (kg*in^2/s^2) -> N-m by (in/m)^2.
+    const float flSwing1 = bFree[1] ? M_PI_F : 0.5f * (flMax[1] - flMin[1]);
+    const float flSwing2 = bFree[2] ? M_PI_F : 0.5f * (flMax[2] - flMin[2]);
+    const float flCone = clamp(Max(flSwing1, flSwing2), 0.0f, M_PI_F);
+    // Strongest axis (average dilutes 1-DOF joints); retail scales friction by reference mass.
     const float flRawTorque = Max(ragdoll.axes[0].torque, Max(ragdoll.axes[1].torque, ragdoll.axes[2].torque));
-    const float flFriction = Max(0.05f, flRawTorque * (InchesToMetres * InchesToMetres));
+    const float flFriction = flRawTorque * pRef->GetMass();
+
+    // Retail gates activation on ragdoll.isActive, not constraint.isActive.
+    constraint_breakableparams_t breakParams = ragdoll.constraint;
+    breakParams.isActive = ragdoll.isActive;
+
+    const bool bCone = flCone < M_PI_F - 1e-3f;
 
     // onlyAngularLimits (AdvBallsocket onlyrotation): rotation-only, translation stays free. Rigid
-    // swing + free twist = parallel joint; all axes rigid = motor joint (angular spring only).
-    if (ragdoll.onlyAngularLimits && flCone <= DEG2RAD(2.0f))
+    // swing + free twist = parallel joint; all axes rigid = motor joint (angular spring only); real
+    // cones/twist limits = no joint, per-step limit solver.
+    if (ragdoll.onlyAngularLimits)
     {
-        const bool bTwistFree = (ragdoll.axes[0].maxRotation - ragdoll.axes[0].minRotation) >= 359.0f;
-        const bool bTwistRigid = fabsf(ragdoll.axes[0].maxRotation - ragdoll.axes[0].minRotation) <= 2.0f;
-        if (bTwistFree)
+        const bool bTwistFree = bFree[0];
+        const bool bTwistRigid = !bFree[0] && fabsf(ragdoll.axes[0].maxRotation - ragdoll.axes[0].minRotation) <= 2.0f;
+        if (flCone <= DEG2RAD(2.0f) && bTwistFree)
         {
             // Parallel joint aligns the frame Z axes; Source twist is the constraint X axis.
             const b3Quat qZtoX = b3ComputeQuatBetweenUnitVectors(b3Vec3_axisZ, b3Vec3_axisX);
@@ -579,9 +798,9 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
             };
             Box3DPhysicsConstraint* pBearing = new Box3DPhysicsConstraint(this, pRef, pAtt);
             pBearing->SetSaveInfo(kBox3DConstraint_Ragdoll, &ragdoll, sizeof(ragdoll));
-            return FinishConstraint(pBearing, pGroup, ragdoll.constraint, buildBearing);
+            return FinishConstraint(pBearing, pGroup, breakParams, buildBearing);
         }
-        if (bTwistRigid)
+        if (flCone <= DEG2RAD(2.0f) && bTwistRigid)
         {
             auto buildLock = [=]() {
                 b3MotorJointDef def = b3DefaultMotorJointDef();
@@ -597,9 +816,19 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
             };
             Box3DPhysicsConstraint* pLock = new Box3DPhysicsConstraint(this, pRef, pAtt);
             pLock->SetSaveInfo(kBox3DConstraint_Ragdoll, &ragdoll, sizeof(ragdoll));
-            return FinishConstraint(pLock, pGroup, ragdoll.constraint, buildLock);
+            return FinishConstraint(pLock, pGroup, breakParams, buildLock);
         }
+
+        // Real cones/twist limits: no joint (translation must stay free), per-step limits only.
+        Box3DPhysicsConstraint* pAngular = new Box3DPhysicsConstraint(this, pRef, pAtt);
+        pAngular->SetSaveInfo(kBox3DConstraint_Ragdoll, &ragdoll, sizeof(ragdoll));
+        pAngular->SetupAngularLimits(frameRef, frameAtt, bCone, flCone, !bFree[0], flMin[0], flMax[0], flFriction, false);
+        m_Pulleys.AddToTail(pAngular);
+        return FinishConstraint(pAngular, pGroup, breakParams, std::function<b3JointId()>());
     }
+
+    // Per-step-limited joints take friction per step; an in-island motor cancels the limit's work.
+    const bool bPerStepLimits = (nDOF == 1 && !bFree[nDofAxis]) || (nDOF >= 2 && (bCone || !bFree[0]));
 
     auto build = [=]() -> b3JointId {
         if (nDOF == 0)
@@ -613,7 +842,7 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
         }
         if (nDOF == 1)
         {
-            // One hinge axis: rotate the frame so the revolute Z sits on that constraint axis.
+            // One hinge axis: revolute Z onto the constraint axis; the angle limit solves per step.
             const b3Vec3 axes[3] = { b3Vec3_axisX, b3Vec3{ 0.0f, 1.0f, 0.0f }, b3Vec3_axisZ };
             const b3Quat qRemap = b3ComputeQuatBetweenUnitVectors(b3Vec3_axisZ, axes[nDofAxis]);
             b3RevoluteJointDef def = b3DefaultRevoluteJointDef();
@@ -623,16 +852,12 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
             def.base.localFrameA.q = b3MulQuat(frameRef.q, qRemap);
             def.base.localFrameB.p = frameAtt.p;
             def.base.localFrameB.q = b3MulQuat(frameAtt.q, qRemap);
-            def.enableLimit = true;
-            def.lowerAngle = ClampAngle(flMin[nDofAxis], flLimit);
-            def.upperAngle = ClampAngle(flMax[nDofAxis], flLimit);
-            def.enableMotor = true;
+            def.enableMotor = !bPerStepLimits;
             def.maxMotorTorque = flFriction;
             return b3CreateRevoluteJoint(world, &def);
         }
 
-        // 2+ DOF: spherical swing cone + twist. Box3D's cone/twist axis is frame Z; Source twist is the
-        // constraint X axis, so rotate the frame to put Z there.
+        // 2+ DOF: spherical ball only; limits solve per step (b3's re-wrap at pi and pi/2 cone cap snap).
         const b3Quat qZtoX = b3ComputeQuatBetweenUnitVectors(b3Vec3_axisZ, b3Vec3_axisX);
         b3SphericalJointDef def = b3DefaultSphericalJointDef();
         def.base.bodyIdA = ref;
@@ -641,18 +866,32 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateRagdollConstraint(
         def.base.localFrameA.q = b3MulQuat(frameRef.q, qZtoX);
         def.base.localFrameB.p = frameAtt.p;
         def.base.localFrameB.q = b3MulQuat(frameAtt.q, qZtoX);
-        def.enableConeLimit = true;
-        def.coneAngle = flCone;
-        def.enableTwistLimit = true;
-        def.lowerTwistAngle = ClampAngle(flMin[0], flLimit);
-        def.upperTwistAngle = ClampAngle(flMax[0], flLimit);
-        def.enableMotor = true;
+        def.enableMotor = !bPerStepLimits;
         def.maxMotorTorque = flFriction;
         return b3CreateSphericalJoint(world, &def);
     };
     Box3DPhysicsConstraint* pConstraint = new Box3DPhysicsConstraint(this, pRef, pAtt);
     pConstraint->SetSaveInfo(kBox3DConstraint_Ragdoll, &ragdoll, sizeof(ragdoll));
-    return FinishConstraint(pConstraint, pGroup, ragdoll.constraint, build);
+
+    if (nDOF == 1 && !bFree[nDofAxis])
+    {
+        // Limit the hinge angle: remap the per-step frame so its twist axis (X) is the DOF axis.
+        const b3Vec3 axes[3] = { b3Vec3_axisX, b3Vec3{ 0.0f, 1.0f, 0.0f }, b3Vec3_axisZ };
+        const b3Quat qRemapX = b3ComputeQuatBetweenUnitVectors(b3Vec3_axisX, axes[nDofAxis]);
+        b3Transform limitFrameRef = frameRef, limitFrameAtt = frameAtt;
+        limitFrameRef.q = b3MulQuat(frameRef.q, qRemapX);
+        limitFrameAtt.q = b3MulQuat(frameAtt.q, qRemapX);
+        pConstraint->SetupAngularLimits(
+            limitFrameRef, limitFrameAtt, false, 0.0f, true, flMin[nDofAxis], flMax[nDofAxis], flFriction, true);
+        m_Pulleys.AddToTail(pConstraint);
+    }
+    else if (nDOF >= 2 && (bCone || !bFree[0]))
+    {
+        pConstraint->SetupAngularLimits(frameRef, frameAtt, bCone, flCone, !bFree[0], flMin[0], flMax[0], flFriction, true);
+        m_Pulleys.AddToTail(pConstraint);
+    }
+
+    return FinishConstraint(pConstraint, pGroup, breakParams, build);
 }
 
 IPhysicsConstraint* Box3DPhysicsEnvironment::CreatePulleyConstraint(

@@ -38,6 +38,7 @@ private:
 
     Vector m_targetPosition = vec3_origin;
     QAngle m_targetAngles = vec3_angle;
+    Vector m_lastPosition = vec3_origin; // controller-predicted position, retail's teleport metric
     Vector m_lastImpulse = vec3_origin;
     float m_secondsToArrival = 0.0f;
     float m_maxSpeed = 0.0f;

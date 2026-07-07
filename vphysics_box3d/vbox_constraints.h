@@ -132,6 +132,20 @@ public:
         return m_bPulley;
     }
 
+    // Ragdoll angular limits + joint friction, solved per step like Havana's hk_Constraint_Limit.
+    void SetupAngularLimits(
+        const b3Transform& frameRef, const b3Transform& frameAtt, bool bCone, float coneAngle, bool bTwist, float twistMin,
+        float twistMax, float flFriction, bool bHasJoint);
+    void SolveAngularLimits(float dt, bool bApplyFriction);
+    bool IsAngularLimits() const
+    {
+        return m_bAngularLimits;
+    }
+    void SetAngularFriction(float flFriction)
+    {
+        m_flAngFriction = flFriction;
+    }
+
 private:
     void DestroyJoint();
     // Apply the breakable params to the live joint: force/torque break thresholds and constraint strength.
@@ -153,6 +167,25 @@ private:
     float m_flPulleyTotalLength = 0.0f;
     float m_flPulleyGearRatio = 1.0f;
     bool m_bPulleyRigid = false;
+
+    bool m_bAngularLimits = false;
+    b3Quat m_AngFrameRef = {}; // constraint frame in each body's local space (twist axis = frame X)
+    b3Quat m_AngFrameAtt = {};
+    bool m_bAngCone = false;
+    float m_flAngCone = 0.0f; // max swing angle (rad)
+    bool m_bAngTwist = false;
+    float m_flAngTwistMin = 0.0f;
+    float m_flAngTwistMax = 0.0f;
+    float m_flTwistUnwrapped = 0.0f; // continuously tracked twist (Havana keeps limits turn-aware)
+    float m_flTwistLastRaw = 0.0f;
+    bool m_bTwistInit = false;
+    float m_flAngFriction = 0.0f;      // joint friction torque (Havana m_joint_friction)
+    float m_flFrictionRefTwist = 0.0f; // friction servo reference angles (Havana m_ref_position)
+    float m_flFrictionRefSwing = 0.0f;
+    bool m_bFrictionInit = false;
+    bool m_bAngHasJoint = false; // re-pin the ball anchor after angular impulses
+    b3Vec3 m_AngAnchorRef = {};  // joint anchor, body-local
+    b3Vec3 m_AngAnchorAtt = {};
 
     Box3DConstraintKind m_SaveKind = kBox3DConstraint_None;
     Box3DConstraintParams m_SaveParams{};

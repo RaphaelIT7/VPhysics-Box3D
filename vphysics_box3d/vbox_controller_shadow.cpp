@@ -161,18 +161,21 @@ void Box3DPhysicsShadowController::GetMaxSpeed(float* pMaxSpeedOut, float* pMaxA
 void Box3DPhysicsShadowController::OnPreSimulate(float flDeltaTime)
 {
     if (!m_enabled)
+    {
+        m_lastPosition = vec3_origin;
         return;
+    }
 
     // Velocity servo toward the target (blockable, physics-movable), same as IVP's shadow.
     hlshadowcontrol_params_t params = {};
     params.targetPosition = m_targetPosition;
     params.targetRotation = m_targetAngles;
-    params.maxSpeed = m_maxSpeed;
-    params.maxAngular = m_maxAngular;
-    params.maxDampSpeed = m_maxDampSpeed;
-    params.maxDampAngular = m_maxDampAngular;
+    params.maxSpeed = m_maxSpeed * MetresToInches;
+    params.maxAngular = m_maxAngular * RAD2DEG(1.0f);
+    params.maxDampSpeed = m_maxDampSpeed * MetresToInches;
+    params.maxDampAngular = m_maxDampAngular * RAD2DEG(1.0f);
     params.dampFactor = 1.0f;
     params.teleportDistance = m_teleportDistance;
 
-    m_secondsToArrival = m_pObject->ComputeShadowControl(params, m_secondsToArrival, flDeltaTime);
+    m_secondsToArrival = m_pObject->ComputeShadowControlEx(params, m_secondsToArrival, flDeltaTime, &m_lastPosition);
 }

@@ -163,6 +163,9 @@ public:
     IPhysicsShadowController* GetShadowController() const override;
     void RemoveShadowController() override;
     float ComputeShadowControl(const hlshadowcontrol_params_t& params, float secondsToArrival, float dt) override;
+    // pLastPosition carries retail's teleport metric (tracking error, not distance to target).
+    float ComputeShadowControlEx(
+        const hlshadowcontrol_params_t& params, float flSecondsToArrival, float flDeltaTime, Vector* pLastPosition);
 
     const CPhysCollide* GetCollide() const override;
     const char* GetName() const override;

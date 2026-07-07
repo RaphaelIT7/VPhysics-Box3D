@@ -859,6 +859,12 @@ static void ClampShadowVelocityAgainstContacts(const Box3DPhysicsObject* pSelf, 
 float Box3DPhysicsObject::ComputeShadowControl(
     const hlshadowcontrol_params_t& params, float flSecondsToArrival, float flDeltaTime)
 {
+    return ComputeShadowControlEx(params, flSecondsToArrival, flDeltaTime, nullptr);
+}
+
+float Box3DPhysicsObject::ComputeShadowControlEx(
+    const hlshadowcontrol_params_t& params, float flSecondsToArrival, float flDeltaTime, Vector* pLastPosition)
+{
     Vector position;
     QAngle angles;
     GetPosition(&position, &angles);
@@ -876,8 +882,13 @@ float Box3DPhysicsObject::ComputeShadowControl(
 
     Vector deltaPosition = params.targetPosition - position;
 
+    // Retail beams on tracking error vs the last predicted position, not distance to target.
+    Vector vecError = deltaPosition;
+    if (pLastPosition && *pLastPosition != vec3_origin)
+        vecError = position - *pLastPosition;
+
     bool bTeleport = false;
-    if (params.teleportDistance > 0.0f && deltaPosition.LengthSqr() > Square(params.teleportDistance))
+    if (params.teleportDistance > 0.0f && vecError.LengthSqr() > Square(params.teleportDistance))
     {
         position = params.targetPosition;
         angles = params.targetRotation;
@@ -915,6 +926,9 @@ float Box3DPhysicsObject::ComputeShadowControl(
         b3Body_SetAngularVelocity(m_BodyId, SourceToBox::AngularImpulse(angularVelocity));
         b3Body_SetAwake(m_BodyId, true);
     }
+
+    if (pLastPosition)
+        *pLastPosition = bTeleport ? vec3_origin : position + linearVelocity * flDeltaTime;
 
     return flSecondsToArrival;
 }
