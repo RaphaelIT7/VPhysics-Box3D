@@ -19,8 +19,8 @@ Work in progress!
 | Prop damage / breaking | ✔️ | ✔️ | ✔️ |
 | Fluid events | ✔️ | ✔️ | ✔️ |
 | Prop splashing effects | ✔️ | ✔️ | ✔️ |
-| Wheeled vehicles | ✔️ | ✔️ | ❌ |
-| Raycast vehicles (airboat) | ✔️ | ❌ | ❌ |
+| Wheeled vehicles | ✔️ | ✔️ | ✔️ |
+| Raycast vehicles (airboat) | ✔️ | ❌ | ✔️ |
 | Shadow controllers (NPCs, doors) | ✔️ | ✔️ | ✔️ |
 | Save / restore | ✔️ | ✔️ | ✔️ |
 | Portal support | ✔️ | ✔️ | ❌ |
