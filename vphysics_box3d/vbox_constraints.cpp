@@ -544,12 +544,13 @@ IPhysicsConstraint* Box3DPhysicsEnvironment::CreateFixedConstraint(
     const b3WorldId world = m_WorldId;
     const b3BodyId ref = pRef->GetBodyID(), att = pAtt->GetBodyID();
 
-    // Weld at the game's designed attached->ref pose (attachedRefXform), not the live pose. frameA is the
-    // reference origin; frameB is its inverse.
+    // Weld at the designed attachedRefXform, frames anchored at the ligher body; an anchor levered
+    // away from a light body couples its rotation into b3's iterative point solve and the weld sags.
     const b3Transform relative = SourceToBox::Transform(fixed.attachedRefXform);
+    const bool bAnchorAtAttached = pRef->IsStatic() || (!pAtt->IsStatic() && pAtt->GetMass() < pRef->GetMass());
     b3Transform frameA = b3Transform_identity;
     b3Transform frameB = b3InvertTransform(relative);
-    if (pRef->IsStatic() && !pAtt->IsStatic())
+    if (bAnchorAtAttached)
     {
         frameA = relative;
         frameB = b3Transform_identity;
