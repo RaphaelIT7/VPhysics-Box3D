@@ -2,7 +2,7 @@
 
 Source VPhysics (IVP/Havok) reimplemented on [Box3D](https://github.com/erincatto/box3d). Modelled on [VPhysics-Jolt](https://github.com/Joshua-Ashton/VPhysics-Jolt) (Volt).
 
-Work in progress!
+For discussions, please join the Discord server [here](https://discord.gg/rbCJdZjewf).
 
 ## Status
 
@@ -51,6 +51,9 @@ Build status per CMake preset. Future support for macOS is unknown.
 To build, see: [build.md](build.md)
 
 ## Media
+
+### IVP/Havok vs. Jolt vs. Box3D
+[![IVP/Havok vs. Jolt vs. Box3D](https://i.ytimg.com/vi/cs8C8T1vg7g/hqdefault.jpg)](https://youtu.be/cs8C8T1vg7g "IVP/Havok vs. Jolt vs. Box3D")
 
 ### Watermelons
 [![Watermelons](https://i.ytimg.com/vi/yTp4jTYFWJ8/hqdefault.jpg)](https://youtu.be/yTp4jTYFWJ8 "Watermelons")
